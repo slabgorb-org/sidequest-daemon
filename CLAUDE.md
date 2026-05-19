@@ -112,7 +112,7 @@ Particularly relevant to this daemon repo:
 | Music tier | 095 (daemon music tier via ACE-Step) |
 | Subject / prompts | 056 (script tool generators), 048 (lore RAG store with cross-process embedding) |
 | Training | 073 (local fine-tuned model architecture), 069 (scenario fixtures), 032 (genre LoRA style training), 034 (portrait identity consistency) |
-| Telemetry | 058 (Claude subprocess OTEL passthrough) |
+| Telemetry | 058 (Claude subprocess OTEL passthrough — *server side superseded by 103*; daemon's `subject_extractor.py` still uses the subprocess passthrough) |
 
 For the full ADR index see `orc-quest/docs/adr/README.md`.
 Drift: `orc-quest/docs/adr/DRIFT.md`. Superseded: `orc-quest/docs/adr/SUPERSEDED.md`.

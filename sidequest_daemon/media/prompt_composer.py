@@ -136,7 +136,12 @@ class PromptComposer:
         # empty because the visual_style.yaml used ``style_prompt`` instead
         # of ``positive_suffix``; without an explicit "world style applied?"
         # signal the GM panel could not tell a styled render from a
-        # styleless one. Both flags MUST be true on a fully-styled render.
+        # styleless one. Since world overrides genre (see
+        # _resolve_art_sensibility), ``world_style_applied`` is the
+        # load-bearing health flag — it MUST be true on any styled render.
+        # ``genre_style_applied`` is true only in the fallback case where a
+        # world ships no visual_style of its own; under normal override it is
+        # False because the genre layer is intentionally suppressed.
         genre_layer_applied = any(
             layer.slot == "ART_SENSIBILITY.GENRE" and layer.tokens.strip()
             for layer in layers
@@ -492,8 +497,24 @@ class PromptComposer:
         recipe = self._recipes.get(target.kind)
         layers: list[LayerContribution] = []
 
+        # World overrides genre — it does NOT blend on top of it. When a world
+        # ships its own visual_style.yaml, that style fully replaces the genre
+        # style; the genre layer is emitted only as a fallback for a world with
+        # no style of its own. Blending stacked the genre's "extreme close-up on
+        # weathered face" grammar onto every world render, which hallucinated a
+        # face into POI landscapes (the spaghetti_western double-image, 2026-05-25).
+        # The 2026-04-29 visual-style decomposition already put the art-movement
+        # lineage on the world layer (see _IDENTITY_FLOOR note); override makes
+        # that authoritative. World suffixes must therefore be self-complete
+        # (carry their own no-text/safety clause).
+        world_text = ""
+        if "WORLD" in recipe.art_sensibility:
+            world_text = self._styles.get_world(target.genre, target.world)
+
         for layer_name in recipe.art_sensibility:
             if layer_name == "GENRE":
+                if world_text.strip():
+                    continue
                 text = self._styles.get_genre(target.genre)
                 layers.append(
                     LayerContribution(
@@ -504,13 +525,12 @@ class PromptComposer:
                     ),
                 )
             elif layer_name == "WORLD":
-                text = self._styles.get_world(target.genre, target.world)
                 layers.append(
                     LayerContribution(
                         slot="ART_SENSIBILITY.WORLD",
                         source=f"world:{target.genre}/{target.world}",
-                        tokens=text,
-                        estimated_tokens=_estimate_tokens(text),
+                        tokens=world_text,
+                        estimated_tokens=_estimate_tokens(world_text),
                     ),
                 )
             elif layer_name == "CULTURE":

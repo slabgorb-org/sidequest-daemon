@@ -336,14 +336,16 @@ def test_illustration_camera_from_render_target(composer: PromptComposer) -> Non
     assert "top-down" in layer.tokens
 
 
-def test_cascade_genre_world_culture_portrait(composer: PromptComposer) -> None:
+def test_cascade_world_overrides_genre_portrait(composer: PromptComposer) -> None:
+    # testworld ships its own visual_style, so it overrides the genre style
+    # entirely — the GENRE layer is suppressed, not stacked on top.
     t = RenderTarget(
         kind="portrait", world="testworld", genre="testgenre",
         character="npc:rux",
     )
     layers = composer._resolve_art_sensibility(t)
     slots = [layer.slot for layer in layers]
-    assert "ART_SENSIBILITY.GENRE" in slots
+    assert "ART_SENSIBILITY.GENRE" not in slots
     assert "ART_SENSIBILITY.WORLD" in slots
     assert "ART_SENSIBILITY.CULTURE" in slots
 
@@ -383,17 +385,19 @@ def test_compose_portrait_assembles_in_order(composer: PromptComposer) -> None:
         character="npc:rux",
     )
     result = composer.compose(t)
-    # Assembly order per spec:
-    # GENRE, WORLD, CASTING, LOCATION, DIRECTION_ACTION, DIRECTION_CAMERA,
+    # Assembly order per spec. World overrides genre, so the WORLD style leads
+    # instead of a GENRE layer:
+    # WORLD, CASTING, LOCATION, DIRECTION_ACTION, DIRECTION_CAMERA,
     # CULTURE, safety clause.
     # DIRECTION_CAMERA contributes no tokens for a portrait — portrait_3q is
     # intentionally blank (cameras.yaml, e3290d4) — so the empty layer drops
     # out of the assembled prompt and is not part of the ordering chain.
-    genre_idx = result.positive_prompt.find("painterly")
+    world_idx = result.positive_prompt.find("amber")
     casting_idx = result.positive_prompt.find("inquisitor")
     culture_idx = result.positive_prompt.find("monastic severity")
     safety_idx = result.positive_prompt.find("solo character focus")
-    assert 0 <= genre_idx < casting_idx < culture_idx < safety_idx
+    assert 0 <= world_idx < casting_idx < culture_idx < safety_idx
+    assert "painterly" not in result.positive_prompt
 
 
 def test_compose_illustration_specific_location_contains_landmark(
@@ -418,7 +422,9 @@ def test_compose_populates_layers_list(composer: PromptComposer) -> None:
     slots = {layer.slot for layer in result.layers}
     assert "CASTING" in slots
     assert "DIRECTION_CAMERA" in slots
-    assert "ART_SENSIBILITY.GENRE" in slots
+    # World overrides genre: the WORLD layer is present, GENRE is suppressed.
+    assert "ART_SENSIBILITY.WORLD" in slots
+    assert "ART_SENSIBILITY.GENRE" not in slots
 
 
 def test_compose_seed_is_deterministic(composer: PromptComposer) -> None:
@@ -439,7 +445,7 @@ def test_eviction_order_drops_location_flourish_first(
     # Build a target that exceeds 512 tokens when every layer is full.
     t = RenderTarget(
         kind="illustration", world="testworld", genre="testgenre",
-        participants=["npc:rux"], action="x " * 360,  # forces overflow past background LOD
+        participants=["npc:rux"], action="x " * 500,  # forces overflow past background LOD
         location="where:testworld/the_lookout", camera=CameraPreset.scene,
     )
     result = composer.compose(t)
@@ -563,14 +569,14 @@ def test_compose_emits_otel_span(composer: PromptComposer, monkeypatch) -> None:
     assert span["payload"]["world"] == "testworld"
     assert "layers" in span["payload"]
     assert any(layer["slot"] == "CASTING" for layer in span["payload"]["layers"])
-    # Bug #2a (playtest 2026-04-26) lie-detector flags. The portrait recipe
-    # includes ART_SENSIBILITY.GENRE; the testgenre fixture has a non-empty
-    # positive_suffix so the genre flag must be true. Whether the world
-    # flag is true depends on the recipe (portrait recipes typically don't
-    # include WORLD), so we just assert the field is present.
+    # Bug #2a (playtest 2026-04-26) lie-detector flags, updated for
+    # world-overrides-genre: testworld ships a visual_style, so it overrides
+    # the genre layer. world_style_applied is the load-bearing flag and must be
+    # True; genre_style_applied is False because the genre layer is suppressed.
     assert "genre_style_applied" in span["payload"]
     assert "world_style_applied" in span["payload"]
-    assert span["payload"]["genre_style_applied"] is True
+    assert span["payload"]["world_style_applied"] is True
+    assert span["payload"]["genre_style_applied"] is False
 
 
 def test_compose_otel_world_flag_true_for_styled_world(
@@ -598,12 +604,14 @@ def test_compose_otel_world_flag_true_for_styled_world(
     )
     composer.compose(t)
     span = next(e for e in emitted if e["name"] == "render.prompt_composed")
-    assert span["payload"]["genre_style_applied"] is True
     assert span["payload"]["world_style_applied"] is True, (
         "world_style_applied must be True when world's visual_style.yaml "
         "has a non-empty positive_suffix and the recipe consumes WORLD; "
         "False here means the regression that hit grimvault is back"
     )
+    # World overrides genre, so the genre layer is suppressed when the world
+    # ships its own style.
+    assert span["payload"]["genre_style_applied"] is False
 
 
 GOLDEN_DIR = Path(__file__).parent / "golden"

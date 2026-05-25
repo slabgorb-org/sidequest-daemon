@@ -317,7 +317,13 @@ def test_portrait_camera_uses_recipe_default(composer: PromptComposer) -> None:
         character="npc:rux",
     )
     layer = composer._resolve_direction_camera(t)
-    assert "three-quarter" in layer.tokens
+    # portrait_3q is the default portrait camera and is INTENTIONALLY blank
+    # (cameras.yaml, commit e3290d4) — prescriptive tokens like "centered
+    # subject"/"detailed face" drove T-pose/photorealism and fought Z-Image's
+    # natural framing. The resolver still wires portrait → portrait_3q; the
+    # preset just contributes no prompt tokens.
+    assert layer.slot == "DIRECTION_CAMERA"
+    assert layer.tokens == ""
 
 
 def test_illustration_camera_from_render_target(composer: PromptComposer) -> None:
@@ -380,12 +386,14 @@ def test_compose_portrait_assembles_in_order(composer: PromptComposer) -> None:
     # Assembly order per spec:
     # GENRE, WORLD, CASTING, LOCATION, DIRECTION_ACTION, DIRECTION_CAMERA,
     # CULTURE, safety clause.
+    # DIRECTION_CAMERA contributes no tokens for a portrait — portrait_3q is
+    # intentionally blank (cameras.yaml, e3290d4) — so the empty layer drops
+    # out of the assembled prompt and is not part of the ordering chain.
     genre_idx = result.positive_prompt.find("painterly")
     casting_idx = result.positive_prompt.find("inquisitor")
-    camera_idx = result.positive_prompt.find("three-quarter")
     culture_idx = result.positive_prompt.find("monastic severity")
     safety_idx = result.positive_prompt.find("solo character focus")
-    assert 0 <= genre_idx < casting_idx < camera_idx < culture_idx < safety_idx
+    assert 0 <= genre_idx < casting_idx < culture_idx < safety_idx
 
 
 def test_compose_illustration_specific_location_contains_landmark(

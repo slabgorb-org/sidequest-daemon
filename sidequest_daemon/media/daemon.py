@@ -41,8 +41,12 @@ from sidequest_daemon.media.recipes import (
 )
 from sidequest_daemon.telemetry import emit_watcher_event as _emit_watcher_event
 
-SOCKET_PATH = Path("/tmp/sidequest-renderer.sock")
-PID_PATH = Path("/tmp/sidequest-renderer.pid")
+# Socket / PID paths default to the well-known /tmp locations. They are
+# env-overridable (SIDEQUEST_RENDERER_SOCK / SIDEQUEST_RENDERER_PID) so a
+# test — or a second daemon instance — can bind an isolated path instead of
+# colliding with the running production daemon on the shared socket.
+SOCKET_PATH = Path(os.environ.get("SIDEQUEST_RENDERER_SOCK", "/tmp/sidequest-renderer.sock"))
+PID_PATH = Path(os.environ.get("SIDEQUEST_RENDERER_PID", "/tmp/sidequest-renderer.pid"))
 
 # Socket ownership guard — set to True only inside ``_run_daemon`` after
 # ``asyncio.start_unix_server`` returns successfully. Cleanup paths (the

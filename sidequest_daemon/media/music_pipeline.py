@@ -56,6 +56,12 @@ def _tempdir():
         shutil.rmtree(d, ignore_errors=True)
 
 
+class RefAudioFetchError(Exception):
+    """Raised when an audio2audio variation's base-theme OGG can't be pulled
+    from R2. Distinguished so the failure event reports stage=ref_fetch rather
+    than being misclassified as an upload/inference error."""
+
+
 @dataclass
 class MusicResult:
     r2_key: str
@@ -68,9 +74,10 @@ class MusicPipeline:
     """Single-job orchestrator. Constructed once per daemon process,
     reused across requests."""
 
-    def __init__(self, *, adapter, r2_uploader, watcher, render_lock):
+    def __init__(self, *, adapter, r2_uploader, r2_downloader, watcher, render_lock):
         self._adapter = adapter
         self._r2_uploader = r2_uploader
+        self._r2_downloader = r2_downloader
         self._watcher = watcher
         self._render_lock = render_lock
 
@@ -92,12 +99,21 @@ class MusicPipeline:
     async def generate(self, json_path: Path) -> MusicResult:
         r2_key = self.derive_r2_key(json_path)
         prompt_excerpt = ""
+        params_for_log: dict = {}
         try:
             params_for_log = json.loads(json_path.read_text())
             prompt_excerpt = str(params_for_log.get("prompt", ""))[:120]
             duration_s = int(params_for_log.get("audio_duration", 0))
         except Exception:
             duration_s = 0
+
+        # audio2audio leitmotif variations name their base-theme OGG by its R2
+        # key in ref_audio_input; resolve it to fetch the bytes at render time.
+        ref_audio_key = None
+        ref = params_for_log.get("ref_audio_input")
+        if params_for_log.get("audio2audio_enable") and isinstance(ref, str) \
+                and ref.startswith("genre_packs/"):
+            ref_audio_key = ref
 
         self._watcher("music.generation.start", {
             "r2_key": r2_key,
@@ -113,8 +129,29 @@ class MusicPipeline:
                     wav_path = td / "out.wav"
                     ogg_path = td / "out.ogg"
 
+                    ref_audio_override = None
+                    if ref_audio_key is not None:
+                        t0 = time.perf_counter()
+                        try:
+                            ref_bytes = self._r2_downloader(ref_audio_key)
+                        except Exception as exc:
+                            raise RefAudioFetchError(
+                                f"could not fetch base audio {ref_audio_key!r}: {exc}"
+                            ) from exc
+                        ref_path = td / "ref.ogg"
+                        ref_path.write_bytes(ref_bytes)
+                        ref_audio_override = str(ref_path)
+                        self._watcher("music.ref_audio.fetch", {
+                            "r2_key": r2_key,
+                            "ref_audio_key": ref_audio_key,
+                            "ref_bytes": len(ref_bytes),
+                            "fetch_ms": int((time.perf_counter() - t0) * 1000),
+                        })
+
                     t0 = time.perf_counter()
-                    inference = self._adapter.run(json_path, wav_path)
+                    inference = self._adapter.run(
+                        json_path, wav_path, ref_audio_override=ref_audio_override
+                    )
                     inference_ms = int((time.perf_counter() - t0) * 1000)
 
                     t0 = time.perf_counter()
@@ -155,6 +192,8 @@ class MusicPipeline:
 
     @staticmethod
     def _classify_failure_stage(exc: Exception) -> str:
+        if isinstance(exc, RefAudioFetchError):
+            return "ref_fetch"
         msg = str(exc).lower()
         if "ffmpeg" in msg or isinstance(exc, subprocess.CalledProcessError):
             return "ffmpeg"

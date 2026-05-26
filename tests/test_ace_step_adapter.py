@@ -151,3 +151,40 @@ def test_prepare_inference_params_only_emits_kwargs_acestep_accepts(tmp_path):
         f"does not accept: {sorted(extras)}. Either rename them in "
         f"prepare_inference_params or add them to _OUTPUT_ONLY_FIELDS."
     )
+
+
+def test_prepare_inference_params_applies_ref_audio_override(tmp_path):
+    """When a ref_audio_override is supplied (a locally-fetched base OGG path),
+    it replaces ref_audio_input so ACE-Step reads the local file, not the R2 key."""
+    raw = {
+        "task": "audio2audio",
+        "prompt": "war drums",
+        "audio_duration": 60,
+        "actual_seeds": [42],
+        "audio2audio_enable": True,
+        "ref_audio_strength": 0.4,
+        "ref_audio_input": "genre_packs/rw/audio/music/convoy.ogg",
+    }
+    json_path = tmp_path / "params.json"
+    json_path.write_text(json.dumps(raw))
+    output_wav = tmp_path / "out.wav"
+    local = "/tmp/render/ref.ogg"
+
+    cleaned = prepare_inference_params(json_path, output_wav, ref_audio_override=local)
+
+    assert cleaned["ref_audio_input"] == local
+    assert cleaned["audio2audio_enable"] is True
+
+
+def test_prepare_inference_params_override_none_leaves_ref_untouched(tmp_path):
+    raw = {
+        "task": "text2music",
+        "prompt": "x",
+        "audio_duration": 60,
+        "actual_seeds": [42],
+        "ref_audio_input": None,
+    }
+    json_path = tmp_path / "params.json"
+    json_path.write_text(json.dumps(raw))
+    cleaned = prepare_inference_params(json_path, tmp_path / "out.wav")
+    assert cleaned["ref_audio_input"] is None

@@ -127,6 +127,40 @@ def upload_artifact(
     return key
 
 
+def download_pack_asset(r2_key: str) -> bytes:
+    """Download the pack asset at `r2_key` (must start with `genre_packs/`) and
+    return its bytes.
+
+    The mirror of `upload_pack_asset`. Used to fetch a base-theme OGG so an
+    audio2audio leitmotif variation can condition on it — the music pipeline
+    persists only the OGG to R2, so the variation's `ref_audio_input` names the
+    base OGG by its R2 key and we pull it back to a local file at render time.
+
+    Raises ValueError on an invalid key. Propagates any boto3/HTTP error
+    verbatim — a missing base OGG must fail loudly, never silently skip the
+    conditioning (no silent fallback).
+    """
+    if not r2_key.startswith("genre_packs/"):
+        raise ValueError(f"r2_key must start with 'genre_packs/', got {r2_key!r}")
+
+    tracer = _get_tracer()
+    t0 = time.perf_counter()
+    with tracer.start_as_current_span("daemon.r2.download.pack_asset") as span:
+        span.set_attribute("download.key", r2_key)
+        try:
+            resp = _client().get_object(Bucket=BUCKET, Key=r2_key)
+            data = resp["Body"].read()
+        except Exception as exc:
+            span.set_attribute("download.error_class", exc.__class__.__name__)
+            span.set_attribute("download.error_message", str(exc))
+            raise
+        dt_ms = int((time.perf_counter() - t0) * 1000)
+        span.set_attribute("download.ms", dt_ms)
+        span.set_attribute("download.bytes", len(data))
+
+    return data
+
+
 def upload_pack_asset(
     *,
     r2_key: str,

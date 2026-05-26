@@ -40,7 +40,7 @@ async def test_full_pipeline_with_real_ffmpeg(tmp_path):
     }))
 
     # Adapter writes a real sine WAV to the requested output path
-    def fake_adapter_run(jp, output_wav):
+    def fake_adapter_run(jp, output_wav, ref_audio_override=None):
         _write_sine_wav(output_wav, duration_s=1)
         return InferenceResult(wav_path=output_wav, seed=42)
     adapter = MagicMock()
@@ -54,7 +54,7 @@ async def test_full_pipeline_with_real_ffmpeg(tmp_path):
 
     pipeline = MusicPipeline(
         adapter=adapter,
-        r2_uploader=capture_upload,
+        r2_uploader=capture_upload, r2_downloader=MagicMock(),
         watcher=MagicMock(),
         render_lock=asyncio.Lock(),
     )

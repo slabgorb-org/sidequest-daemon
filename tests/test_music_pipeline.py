@@ -48,7 +48,7 @@ def test_generate_happy_path_orchestrates_all_stages(tmp_path):
     _write_json(json_path)
 
     # Mock adapter — pretends to write a wav at the requested path
-    def fake_run(jp, output_wav):
+    def fake_run(jp, output_wav, ref_audio_override=None):
         output_wav.write_bytes(b"fake wav bytes")
         from sidequest_daemon.media.ace_step_adapter import InferenceResult
         return InferenceResult(wav_path=output_wav, seed=42)
@@ -64,7 +64,7 @@ def test_generate_happy_path_orchestrates_all_stages(tmp_path):
     render_lock = asyncio.Lock()
 
     pipeline = MusicPipeline(
-        adapter=adapter, r2_uploader=r2_uploader,
+        adapter=adapter, r2_uploader=r2_uploader, r2_downloader=MagicMock(),
         watcher=watcher, render_lock=render_lock,
     )
 
@@ -95,7 +95,7 @@ def test_generate_inference_failure_emits_failed_event_stage_inference(tmp_path)
     adapter = MagicMock()
     adapter.run.side_effect = RuntimeError("CUDA OOM")
     pipeline = MusicPipeline(
-        adapter=adapter, r2_uploader=MagicMock(),
+        adapter=adapter, r2_uploader=MagicMock(), r2_downloader=MagicMock(),
         watcher=MagicMock(), render_lock=asyncio.Lock(),
     )
     with pytest.raises(RuntimeError):
@@ -112,7 +112,7 @@ def test_generate_ffmpeg_failure_emits_failed_event_stage_ffmpeg(tmp_path):
     json_path = pack_dir / "combat_input_params.json"
     _write_json(json_path)
 
-    def fake_run(jp, output_wav):
+    def fake_run(jp, output_wav, ref_audio_override=None):
         output_wav.write_bytes(b"fake")
         from sidequest_daemon.media.ace_step_adapter import InferenceResult
         return InferenceResult(wav_path=output_wav, seed=42)
@@ -120,7 +120,7 @@ def test_generate_ffmpeg_failure_emits_failed_event_stage_ffmpeg(tmp_path):
     adapter.run.side_effect = fake_run
 
     pipeline = MusicPipeline(
-        adapter=adapter, r2_uploader=MagicMock(),
+        adapter=adapter, r2_uploader=MagicMock(), r2_downloader=MagicMock(),
         watcher=MagicMock(), render_lock=asyncio.Lock(),
     )
     with patch("sidequest_daemon.media.music_pipeline._run_ffmpeg") as mock_ffmpeg:
@@ -140,7 +140,7 @@ def test_generate_params_failure_emits_failed_event_stage_params(tmp_path):
     _write_json(json_path)
 
     pipeline = MusicPipeline(
-        adapter=MagicMock(), r2_uploader=MagicMock(),
+        adapter=MagicMock(), r2_uploader=MagicMock(), r2_downloader=MagicMock(),
         watcher=MagicMock(), render_lock=asyncio.Lock(),
     )
     with pytest.raises(ValueError, match="INVALID_PARAMS_LOCATION"):
@@ -157,14 +157,14 @@ def test_generate_cleans_tempfiles_on_failure(tmp_path):
     _write_json(json_path)
 
     captured_tempdirs = []
-    def capturing_run(jp, output_wav):
+    def capturing_run(jp, output_wav, ref_audio_override=None):
         captured_tempdirs.append(output_wav.parent)
         raise RuntimeError("fail in inference")
     adapter = MagicMock()
     adapter.run.side_effect = capturing_run
 
     pipeline = MusicPipeline(
-        adapter=adapter, r2_uploader=MagicMock(),
+        adapter=adapter, r2_uploader=MagicMock(), r2_downloader=MagicMock(),
         watcher=MagicMock(), render_lock=asyncio.Lock(),
     )
     with pytest.raises(RuntimeError):

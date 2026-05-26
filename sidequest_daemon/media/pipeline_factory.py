@@ -12,7 +12,7 @@ import logging
 
 from sidequest_daemon.media.ace_step_adapter import AceStepAdapter
 from sidequest_daemon.media.music_pipeline import MusicPipeline
-from sidequest_daemon.media.r2_writer import upload_pack_asset
+from sidequest_daemon.media.r2_writer import download_pack_asset, upload_pack_asset
 from sidequest_daemon.telemetry import emit_watcher_event
 
 log = logging.getLogger(__name__)
@@ -35,12 +35,16 @@ class MediaPipelineFactory:
                 content_type=content_type,
             )
 
+        def _r2_downloader(r2_key: str) -> bytes:
+            return download_pack_asset(r2_key)
+
         def _watcher(event_type: str, fields: dict) -> None:
             emit_watcher_event(event_type, fields, component="daemon.music")
 
         self.music_pipeline = MusicPipeline(
             adapter=adapter,
             r2_uploader=_r2_uploader,
+            r2_downloader=_r2_downloader,
             watcher=_watcher,
             render_lock=render_lock,
         )

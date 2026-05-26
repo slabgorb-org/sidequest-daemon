@@ -22,13 +22,19 @@ log = logging.getLogger(__name__)
 _OUTPUT_ONLY_FIELDS = frozenset({"timecosts", "retake_seeds"})
 
 
-def prepare_inference_params(json_path: Path, output_wav: Path) -> dict[str, Any]:
+def prepare_inference_params(
+    json_path: Path, output_wav: Path, ref_audio_override: str | None = None
+) -> dict[str, Any]:
     """Read JSON params, strip output fields, force wav, rename to ACE-Step kwargs.
 
     The JSON params files use ACE-Step's *output* field names (what the
     library writes back after a run): `actual_seeds`, `audio_path`. The
     library's `__call__` signature uses *input* names: `manual_seeds`,
     `save_path`. Rename on the way in.
+
+    `ref_audio_override`, when given, replaces `ref_audio_input` — the caller
+    has fetched the base-theme OGG (named by its R2 key in the JSON) to a local
+    path, and ACE-Step must read that local file, not the unresolvable R2 key.
 
     Raises ValueError if `actual_seeds[0]` is missing or non-integer
     (no implicit randomness — see spec §4.2 seed contract).
@@ -38,6 +44,9 @@ def prepare_inference_params(json_path: Path, output_wav: Path) -> dict[str, Any
     cleaned = {k: v for k, v in raw.items() if k not in _OUTPUT_ONLY_FIELDS}
 
     cleaned["format"] = "wav"
+
+    if ref_audio_override is not None:
+        cleaned["ref_audio_input"] = ref_audio_override
 
     seeds = cleaned.pop("actual_seeds", None)
     if not isinstance(seeds, list) or not seeds or not isinstance(seeds[0], int):
@@ -77,8 +86,10 @@ class AceStepAdapter:
             log.info("ACE-Step pipeline loaded (cold start)")
         return self._pipeline
 
-    def run(self, json_path: Path, output_wav: Path) -> InferenceResult:
-        params = prepare_inference_params(json_path, output_wav)
+    def run(
+        self, json_path: Path, output_wav: Path, ref_audio_override: str | None = None
+    ) -> InferenceResult:
+        params = prepare_inference_params(json_path, output_wav, ref_audio_override)
         pipeline = self._ensure_loaded()
         pipeline(**params)
         return InferenceResult(wav_path=output_wav, seed=params["manual_seeds"][0])

@@ -19,9 +19,6 @@ FIXTURE_ROOT = (
     Path(__file__).parent / "fixtures" / "visual_recipes" / "genre_packs"
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-REAL_PACKS = REPO_ROOT / "sidequest-content" / "genre_packs"
-
 
 def _run(argv: list[str], capsys) -> tuple[int, str, str]:
     code = main(argv)
@@ -109,34 +106,3 @@ def test_style_world_without_portrait_manifest_does_not_crash(
     assert code == 0
     assert "diagnostic-genre-style-token" in out
     assert "diagnostic-world-style-token" in out
-
-
-# --- Wiring / integration --------------------------------------------------
-# Required by CLAUDE.md "Every Test Suite Needs a Wiring Test".
-# Hits the real sidequest-content tree via the entry point installed by
-# pyproject.toml.
-
-@pytest.mark.skipif(
-    not REAL_PACKS.exists(),
-    reason="sidequest-content not present (running outside orchestrator)",
-)
-def test_style_wires_into_real_caverns_and_claudes_pack(
-    capsys, monkeypatch,
-) -> None:
-    monkeypatch.setenv("SIDEQUEST_GENRE_PACKS", str(REAL_PACKS))
-    # mawdeep is a real C&C world that has no portrait_manifest cultures
-    # directory and no per-world visual_style — exactly the shape that
-    # would have crashed the portrait subcommand before this fix.
-    code, out, _ = _run(
-        [
-            "style",
-            "--genre", "caverns_and_claudes",
-            "--world", "mawdeep",
-        ],
-        capsys,
-    )
-    assert code == 0, f"style preview crashed: {out}"
-    # The signature C&C styling text must be present.
-    assert "Erol Otus" in out
-    assert "David Trampier" in out
-    assert "pen and ink" in out

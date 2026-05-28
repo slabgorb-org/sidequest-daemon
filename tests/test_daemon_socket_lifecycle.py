@@ -26,18 +26,40 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
 
 from sidequest_daemon.media import daemon as daemon_mod
 
+# Socket/PID paths are isolated per-test via the daemon_process fixture (see
+# SIDEQUEST_RENDERER_SOCK / SIDEQUEST_RENDERER_PID overrides), so these tests
+# never collide with a daemon bound at the shared /tmp path.
+_DaemonHandle = namedtuple("_DaemonHandle", ["proc", "sock", "pid"])
 
-SOCKET_PATH = Path("/tmp/sidequest-renderer.sock")
-PID_PATH = Path("/tmp/sidequest-renderer.pid")
+
+async def _read_rpc_response(reader, expected_id: str, timeout: float = 5.0) -> dict:
+    """Read lines until the JSON-RPC response for ``expected_id`` arrives,
+    skipping daemon server-push frames (e.g. ``{"event": "heartbeat", ...}``,
+    which carry no matching ``id``) multiplexed onto the same connection."""
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise AssertionError(f"no RPC response for id={expected_id!r} within {timeout}s")
+        line = await asyncio.wait_for(reader.readline(), timeout=remaining)
+        if not line:
+            raise AssertionError("connection closed before RPC response arrived")
+        msg = json.loads(line)
+        if msg.get("id") == expected_id:
+            return msg
 
 
 def test_owns_socket_flag_starts_false():
@@ -104,9 +126,16 @@ def test_live_daemon_pid_handles_garbage(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def daemon_process(tmp_path):
-    """Boot the real daemon in a subprocess (no warmup → fast). Tear it
-    down after the test.
+def daemon_process(tmp_path, monkeypatch):
+    """Boot the real daemon in a subprocess (no warmup → fast) on an
+    ISOLATED socket/PID path. Tear it down after the test.
+
+    Socket isolation: SIDEQUEST_RENDERER_SOCK / SIDEQUEST_RENDERER_PID pin
+    the daemon's paths under ``tmp_path`` so the test never collides with a
+    daemon bound at the shared ``/tmp`` location (e.g. a running ``just up``
+    dev daemon). The in-process ``daemon_mod`` globals are monkeypatched to
+    the same paths so in-process helpers (``send_shutdown``) and the test
+    assertions agree with the subprocess.
 
     Critical: ``HOME`` is overridden to ``tmp_path`` so the daemon's
     handshake write (``~/.sidequest/daemon-output-dir``) lands in test
@@ -117,10 +146,20 @@ def daemon_process(tmp_path):
     ``create_app`` is reloaded — exactly the failure that hid behind
     the playtest 2026-04-26 "scrapbook images stopped" report.
     """
+    # The socket must live on a SHORT path — the AF_UNIX sun_path limit
+    # (~104 chars on macOS) is shorter than a nested pytest tmp_path. A small
+    # mkdtemp dir keeps it well under the limit while staying isolated.
+    sockdir = Path(tempfile.mkdtemp(prefix="sqd_"))
+    sock = sockdir / "r.sock"
+    pid = sockdir / "r.pid"
+    monkeypatch.setattr(daemon_mod, "SOCKET_PATH", sock)
+    monkeypatch.setattr(daemon_mod, "PID_PATH", pid)
     env = {
         **os.environ,
         "SIDEQUEST_GENRE_PACKS": str(tmp_path),
         "HOME": str(tmp_path),
+        "SIDEQUEST_RENDERER_SOCK": str(sock),
+        "SIDEQUEST_RENDERER_PID": str(pid),
     }
     # --no-warmup keeps this test under ~3s. The race we are guarding
     # against is socket-lifecycle, not model-loading.
@@ -138,17 +177,17 @@ def daemon_process(tmp_path):
     # Wait for the socket file to appear.
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
-        if SOCKET_PATH.exists():
+        if sock.exists():
             break
         time.sleep(0.1)
     else:
         proc.kill()
         stdout, stderr = proc.communicate(timeout=5)
         pytest.fail(
-            f"daemon never created {SOCKET_PATH}\n"
+            f"daemon never created {sock}\n"
             f"stdout: {stdout.decode()}\nstderr: {stderr.decode()}"
         )
-    yield proc
+    yield _DaemonHandle(proc=proc, sock=sock, pid=pid)
     if proc.poll() is None:
         proc.send_signal(signal.SIGTERM)
         try:
@@ -156,20 +195,21 @@ def daemon_process(tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
+    shutil.rmtree(sockdir, ignore_errors=True)
 
 
 def test_socket_file_present_after_bind(daemon_process):
     """The core fail-mode regression: after the daemon logs that it is
     listening, the socket file must actually exist on disk and be a
     socket node — not unlinked out from under the bound fd."""
-    assert SOCKET_PATH.exists(), (
-        f"daemon bound the socket but the file is missing from {SOCKET_PATH} — "
+    sock = daemon_process.sock
+    assert sock.exists(), (
+        f"daemon bound the socket but the file is missing from {sock} — "
         "this is the exact failure mode of the 2026-04-26 P1 bug"
     )
     # And it must be a socket, not a regular file.
-    assert SOCKET_PATH.is_socket(), (
-        f"{SOCKET_PATH} exists but is not a socket node "
-        f"(mode={SOCKET_PATH.stat().st_mode:o})"
+    assert sock.is_socket(), (
+        f"{sock} exists but is not a socket node (mode={sock.stat().st_mode:o})"
     )
 
 
@@ -186,29 +226,35 @@ async def test_socket_survives_warmup_helper_invocation(daemon_process):
     leave the system in the exact state described in the bug report:
     process holds bound fd, file gone from disk, clients fail to connect.
     """
+    sock = daemon_process.sock
     # Simulate the racing helper: invoke ``--shutdown`` against the live
     # daemon, but kill it immediately so it can never actually shutdown
-    # cleanly. This exercises the ``send_shutdown`` cleanup branch.
+    # cleanly. This exercises the ``send_shutdown`` cleanup branch. The
+    # helper must target the SAME isolated socket the daemon bound, so it
+    # inherits the SIDEQUEST_RENDERER_SOCK/PID overrides via env.
     helper = subprocess.Popen(
         ["sidequest-renderer", "--status"],
+        env={
+            **os.environ,
+            "SIDEQUEST_RENDERER_SOCK": str(sock),
+            "SIDEQUEST_RENDERER_PID": str(daemon_process.pid),
+        },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     helper.wait(timeout=10)
 
     # The live daemon's socket must still be on disk and connectable.
-    assert SOCKET_PATH.exists(), (
+    assert sock.exists(), (
         "racing helper unlinked the live daemon's socket — _owns_socket "
         "guard or _live_daemon_pid() probe failed"
     )
-    reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
+    reader, writer = await asyncio.open_unix_connection(str(sock))
     try:
         request = json.dumps({"id": "lifecycle", "method": "ping", "params": {}})
         writer.write((request + "\n").encode())
         await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-        response = json.loads(line)
-        assert response["id"] == "lifecycle"
+        response = await _read_rpc_response(reader, "lifecycle")
         assert response["result"]["status"] == "ok"
     finally:
         writer.close()
@@ -223,8 +269,8 @@ def test_send_shutdown_refuses_to_unlink_live_daemons_socket(
     fix, any ``ConnectionRefusedError`` (e.g. mid-startup race) would
     unlink the path the live daemon had bound to."""
     # Sanity: the daemon is up and the PID file points at it.
-    assert PID_PATH.exists()
-    pid = int(PID_PATH.read_text().strip())
+    assert daemon_process.pid.exists()
+    pid = int(daemon_process.pid.read_text().strip())
     os.kill(pid, 0)  # raises if dead
 
     # Force ``send_shutdown`` into the cleanup branch by monkey-patching
@@ -244,11 +290,11 @@ def test_send_shutdown_refuses_to_unlink_live_daemons_socket(
         asyncio.open_unix_connection = original  # type: ignore[assignment]
 
     # The socket file MUST still be on disk — the live daemon owns it.
-    assert SOCKET_PATH.exists(), (
+    assert daemon_process.sock.exists(), (
         "send_shutdown unlinked the live daemon's socket despite the "
         "PID file pointing at a running process — the _live_daemon_pid() "
         "guard failed"
     )
-    assert PID_PATH.exists(), (
+    assert daemon_process.pid.exists(), (
         "send_shutdown unlinked the live daemon's PID file"
     )

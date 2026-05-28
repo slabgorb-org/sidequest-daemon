@@ -106,3 +106,12 @@ def test_style_world_without_portrait_manifest_does_not_crash(
     assert code == 0
     assert "diagnostic-genre-style-token" in out
     assert "diagnostic-world-style-token" in out
+
+
+# NOTE: a former wiring test here drove the `style` subcommand against the real
+# sidequest-content tree (caverns_and_claudes/mawdeep). It was removed: it
+# asserted on live content (signature C&C style tokens) — content-validation
+# work that now belongs to validators, not the daemon unit suite — and it
+# pointed at the `mawdeep` world, which no longer exists. The entry-point wiring
+# is already covered by test_style_text_output_against_fixture, which calls
+# `main(...)` against the fixture pack.

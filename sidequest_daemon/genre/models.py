@@ -33,7 +33,6 @@ class VisualStyle(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     positive_suffix: str = ""
-    negative_prompt: str = ""
     preferred_model: str = "flux"
     base_seed: int = 0
     visual_tag_overrides: dict[str, str] = {}

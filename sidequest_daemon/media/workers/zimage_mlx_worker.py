@@ -428,6 +428,26 @@ class ZImageMLXWorker:
                     )
 
                 tier_cfg = get_zimage_config(tier, self.fidelity)
+
+                # Caller-supplied inference-step override (send_render's
+                # `--steps` flag, carried as params["steps"]). When present it
+                # wins over the (tier, fidelity) default; when absent the tier
+                # default stands. Fail loud on a nonsensical value rather than
+                # silently falling back to the default (No Silent Fallbacks).
+                steps_override = params.get("steps")
+                if steps_override is not None and (
+                    not isinstance(steps_override, int)
+                    or isinstance(steps_override, bool)
+                    or steps_override <= 0
+                ):
+                    raise ValueError(
+                        f"render request 'steps' must be a positive int, got "
+                        f"{steps_override!r}"
+                    )
+                effective_steps = (
+                    steps_override if steps_override is not None else tier_cfg.steps
+                )
+
                 prompt = self._compose_prompt(params)
                 negative_prompt = params.get("negative_prompt") or None
                 seed = params.get("seed", 0)
@@ -438,19 +458,27 @@ class ZImageMLXWorker:
                 span.set_attribute("render.seed", seed)
                 span.set_attribute("render.width", tier_cfg.width)
                 span.set_attribute("render.height", tier_cfg.height)
-                span.set_attribute("render.steps", tier_cfg.steps)
+                # render.steps reports the steps ACTUALLY used; the two extra
+                # attributes let the GM panel see whether a caller override was
+                # in play and what the tier default would have been.
+                span.set_attribute("render.steps", effective_steps)
+                span.set_attribute("render.steps_default", tier_cfg.steps)
+                span.set_attribute("render.steps_overridden", steps_override is not None)
                 span.set_attribute("render.guidance", tier_cfg.guidance)
                 span.set_attribute("render.prompt_length", len(prompt))
                 span.set_attribute("render.negative_length", len(negative_prompt or ""))
 
                 log.info(
-                    "ZIMAGE RENDER [%s] fidelity=%s seed=%s w=%s h=%s steps=%s",
+                    "ZIMAGE RENDER [%s] fidelity=%s seed=%s w=%s h=%s steps=%s%s",
                     tier_name,
                     self.fidelity,
                     seed,
                     tier_cfg.width,
                     tier_cfg.height,
-                    tier_cfg.steps,
+                    effective_steps,
+                    f" (override; default {tier_cfg.steps})"
+                    if steps_override is not None
+                    else "",
                 )
                 log.info("  prompt: %s", prompt[:150])
 
@@ -474,7 +502,7 @@ class ZImageMLXWorker:
                 image = self.model.generate_image(  # type: ignore[attr-defined]
                     seed=seed,
                     prompt=prompt,
-                    num_inference_steps=tier_cfg.steps,
+                    num_inference_steps=effective_steps,
                     guidance=guidance_arg,
                     width=tier_cfg.width,
                     height=tier_cfg.height,

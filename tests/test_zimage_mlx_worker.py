@@ -95,6 +95,71 @@ def test_render_passes_negative_prompt_to_model(worker: ZImageMLXWorker):
     assert call_kwargs["seed"] == 1
 
 
+def test_render_honors_steps_override(worker: ZImageMLXWorker):
+    """A caller-supplied params["steps"] overrides the tier/fidelity default.
+
+    Regression guard for the dead `--steps` flag: before this fix send_render
+    dropped steps and the worker hardcoded tier_cfg.steps, so 15 and 30 both
+    rendered at the tier default. The override must reach generate_image.
+    """
+    mock_model = MagicMock()
+    mock_model.generate_image.return_value = _fake_pil_image()
+    worker.model = mock_model
+
+    worker.render(
+        {
+            "tier": "portrait",
+            "positive_prompt": "a face",
+            "seed": 1,
+            "steps": 30,
+        }
+    )
+
+    assert mock_model.generate_image.call_args.kwargs["num_inference_steps"] == 30
+
+
+def test_render_defaults_steps_to_tier_config_when_absent(worker: ZImageMLXWorker):
+    """No params["steps"] → the (tier, fidelity) default still applies.
+
+    Guards the back-compat path: in-session / legacy callers that send no
+    steps must keep getting the tier default, not a hardcoded number.
+    """
+    from sidequest_daemon.media.zimage_config import get_zimage_config
+    from sidequest_daemon.renderer.models import RenderTier
+
+    default_steps = get_zimage_config(RenderTier.PORTRAIT, worker.fidelity).steps
+
+    mock_model = MagicMock()
+    mock_model.generate_image.return_value = _fake_pil_image()
+    worker.model = mock_model
+
+    worker.render({"tier": "portrait", "positive_prompt": "a face", "seed": 1})
+
+    assert (
+        mock_model.generate_image.call_args.kwargs["num_inference_steps"]
+        == default_steps
+    )
+
+
+@pytest.mark.parametrize("bad_steps", [0, -5, 2.5, True])
+def test_render_rejects_invalid_steps(worker: ZImageMLXWorker, bad_steps):
+    """A non-positive / non-int steps override fails loud (No Silent Fallbacks)."""
+    mock_model = MagicMock()
+    mock_model.generate_image.return_value = _fake_pil_image()
+    worker.model = mock_model
+
+    with pytest.raises(ValueError, match="positive int"):
+        worker.render(
+            {
+                "tier": "portrait",
+                "positive_prompt": "a face",
+                "seed": 1,
+                "steps": bad_steps,
+            }
+        )
+    mock_model.generate_image.assert_not_called()
+
+
 
 
 def test_worker_targets_z_image_base_by_default(worker: ZImageMLXWorker):

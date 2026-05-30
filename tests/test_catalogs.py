@@ -9,7 +9,12 @@ from sidequest_daemon.media.catalogs import (
     PlaceTokens,
     StyleCatalog,
 )
-from sidequest_daemon.media.recipes import LOD, CatalogMissError, PlaceLOD
+from sidequest_daemon.media.recipes import (
+    LOD,
+    CatalogMissError,
+    PlaceLOD,
+    StyleMissError,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "visual_recipes" / "genre_packs"
 
@@ -134,6 +139,61 @@ def test_loads_world_style():
     cat = StyleCatalog.load(FIXTURE_ROOT, genre="testgenre", world="testworld")
     tokens = cat.get_world("testgenre", "testworld")
     assert "amber" in tokens
+
+
+def _write_style_tree(
+    root: Path,
+    *,
+    genre: str,
+    world: str,
+    genre_suffix: str | None,
+    world_suffix: str | None,
+) -> None:
+    """Build a minimal genre_packs tree. ``None`` suffix => omit that file."""
+    gdir = root / genre
+    wdir = gdir / "worlds" / world
+    wdir.mkdir(parents=True, exist_ok=True)
+    if genre_suffix is not None:
+        (gdir / "visual_style.yaml").write_text(f"positive_suffix: {genre_suffix}\n")
+    if world_suffix is not None:
+        (wdir / "visual_style.yaml").write_text(f"positive_suffix: {world_suffix}\n")
+
+
+def test_genre_style_optional_when_world_present(tmp_path: Path) -> None:
+    """2026-05-29 directive: pack-level (genre) visual_style is OPTIONAL.
+
+    A world ships its own style; the genre file is absent. Load succeeds and
+    the world style is intact. ``get_genre`` raises (genre layer absent) — the
+    composer never calls it when a world style is present, so this is the
+    correct fail-loud-only-if-actually-needed behavior.
+    """
+    _write_style_tree(
+        tmp_path, genre="g", world="w", genre_suffix=None, world_suffix="amber dusk"
+    )
+    cat = StyleCatalog.load(tmp_path, genre="g", world="w")
+    assert "amber" in cat.get_world("g", "w")
+    with pytest.raises(CatalogMissError):
+        cat.get_genre("g")
+
+
+def test_world_style_still_required(tmp_path: Path) -> None:
+    """No silent fallback: with neither genre nor world style, load fails loud
+    (the world remains the required backstop)."""
+    _write_style_tree(
+        tmp_path, genre="g", world="w", genre_suffix=None, world_suffix=None
+    )
+    with pytest.raises(StyleMissError):
+        StyleCatalog.load(tmp_path, genre="g", world="w")
+
+
+def test_present_but_empty_genre_style_fails_loud(tmp_path: Path) -> None:
+    """A genre file that EXISTS but has an empty positive_suffix is a broken
+    config, not by-design absence — it still fails loud."""
+    _write_style_tree(
+        tmp_path, genre="g", world="w", genre_suffix="", world_suffix="amber dusk"
+    )
+    with pytest.raises(StyleMissError):
+        StyleCatalog.load(tmp_path, genre="g", world="w")
 
 
 

@@ -271,24 +271,26 @@ class StyleCatalog:
         culture_tokens: dict[tuple[str, str, str], str] = {}
 
         genre_style = genre_packs_root / genre / "visual_style.yaml"
-        if not genre_style.exists():
-            raise StyleMissError(
-                scope="genre",
-                identifier=genre,
-                reason=f"missing visual_style.yaml at {genre_style}",
-            )
-        data = yaml.safe_load(genre_style.read_text()) or {}
-        suffix = data.get("positive_suffix", "")
-        if not suffix:
-            raise StyleMissError(
-                scope="genre",
-                identifier=genre,
-                reason=(
-                    f"empty or missing positive_suffix in {genre_style} "
-                    f"(known_keys={sorted(data.keys())})"
-                ),
-            )
-        genre_tokens[genre] = suffix
+        # Pack-level (genre) visual_style is OPTIONAL (2026-05-29 directive —
+        # visual prompts live at world level). Every recipe's cascade is
+        # [GENRE, WORLD, CULTURE] and the composer skips the GENRE layer
+        # whenever a WORLD style is present (always — world style is required
+        # below), so the genre layer is a fallback that never fires in
+        # practice. An ABSENT genre file is by-design; a PRESENT-but-empty
+        # file is a broken config and still fails loud (No Silent Fallbacks).
+        if genre_style.exists():
+            data = yaml.safe_load(genre_style.read_text()) or {}
+            suffix = data.get("positive_suffix", "")
+            if not suffix:
+                raise StyleMissError(
+                    scope="genre",
+                    identifier=genre,
+                    reason=(
+                        f"empty or missing positive_suffix in {genre_style} "
+                        f"(known_keys={sorted(data.keys())})"
+                    ),
+                )
+            genre_tokens[genre] = suffix
 
         world_style = genre_packs_root / genre / "worlds" / world / "visual_style.yaml"
         if not world_style.exists():

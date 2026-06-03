@@ -212,13 +212,9 @@ async def dispatch_request(
 ) -> dict:
     """Route a JSON-RPC render request to the right handler based on tier.
 
-    Currently routes only `tier=music` to `music_pipeline.generate()`.
-    Image tiers (`tier in IMAGE_TIERS`) are still dispatched inline by
-    `_handle_client` — calling this function with an image tier is a
-    programming error.
-
-    Future tasks (see plan 2026-05-10-daemon-between-session-music-generation)
-    will move image dispatch through this function as well.
+    Routes `tier=music` to `music_pipeline.generate()`. Image tiers are
+    dispatched inline by `_handle_client` and never reach this function;
+    any other tier raises `ValueError` loudly (no silent fallback).
     """
     method = request.get("method")
     if method != "render":
@@ -242,13 +238,6 @@ async def dispatch_request(
                 "elapsed_ms": result.elapsed_ms,
             },
         }
-
-    if tier in IMAGE_TIERS:
-        raise NotImplementedError(
-            "Image tier dispatch is still inline in _handle_client; "
-            "dispatch_request handles music only until Task 12 of the "
-            "between-session music generation plan wires image tiers here."
-        )
 
     raise ValueError(f"Unknown tier: {tier!r}")
 

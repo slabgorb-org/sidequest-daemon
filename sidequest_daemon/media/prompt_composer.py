@@ -21,6 +21,7 @@ from sidequest_daemon.media.recipes import (
     LayerContribution,
     LOD,
     PlaceLOD,
+    PostDirective,
     RenderTarget,
 )
 from sidequest_daemon.media.zimage_config import get_zimage_config
@@ -199,6 +200,7 @@ class PromptComposer:
             layers=layers,
             dropped_layers=dropped,
             warnings=warnings,
+            post=self._resolve_post_directive(target),
         )
 
     def _downgrade_one_participant(self, plan: dict[str, LOD]) -> bool:
@@ -474,15 +476,21 @@ class PromptComposer:
             estimated_tokens=_estimate_tokens(text),
         )
 
-    def _resolve_direction_camera(
-        self, target: RenderTarget
-    ) -> LayerContribution:
+    def _resolve_camera_preset(self, target: RenderTarget) -> CameraPreset | None:
+        """The camera preset this target resolves to: the recipe's fixed preset,
+        or — for the ``{camera}`` recipe binding — the target's own camera
+        (which may be ``None``). Single source of truth shared by
+        ``_resolve_direction_camera`` (which requires a preset) and
+        ``_resolve_post_directive`` (which tolerates its absence).
+        """
         recipe = self._recipes.get(target.kind)
         if recipe.direction_camera == "{camera}":
-            assert target.camera is not None
-            preset = target.camera
-        else:
-            preset = CameraPreset(recipe.direction_camera)
+            return target.camera
+        return CameraPreset(recipe.direction_camera)
+
+    def _resolve_direction_camera(self, target: RenderTarget) -> LayerContribution:
+        preset = self._resolve_camera_preset(target)
+        assert preset is not None
         spec = self._cameras.get(preset)
         return LayerContribution(
             slot="DIRECTION_CAMERA",
@@ -490,6 +498,20 @@ class PromptComposer:
             tokens=spec.prompt,
             estimated_tokens=_estimate_tokens(spec.prompt),
         )
+
+    def _resolve_post_directive(self, target: RenderTarget) -> PostDirective | None:
+        """The post-processing directive (if any) of the camera this target
+        resolves to — the same preset ``_resolve_direction_camera`` selects.
+
+        Carried on ``ComposedPrompt.post`` so the daemon can forward it to the
+        worker, which applies the crop/rotate after generation (Story 78-1).
+        Returns ``None`` when the target resolves to no camera, or when the
+        resolved camera sets no ``post:`` directive.
+        """
+        preset = self._resolve_camera_preset(target)
+        if preset is None:
+            return None
+        return self._cameras.get(preset).post
 
     def _resolve_art_sensibility(
         self, target: RenderTarget

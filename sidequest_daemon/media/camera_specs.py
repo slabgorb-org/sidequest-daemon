@@ -3,21 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 from pydantic import BaseModel
 
-from sidequest_daemon.media.recipes import CameraPreset
+from sidequest_daemon.media.recipes import CameraPreset, PostDirective
 
-
-class PostDirective(BaseModel):
-    """Post-processing applied after the image renders."""
-
-    kind: Literal["crop", "rotate"]
-    mode: Literal["center", "subject_center"] | None = None
-    percent: float | None = None  # crop
-    degrees: float | None = None  # rotate
+# PostDirective is defined in ``recipes`` (so ``ComposedPrompt`` can carry it
+# without a circular import) and re-exported here for backward compatibility
+# with existing importers (post_processor, tests).
+__all__ = ["PostDirective", "CameraSpec", "CameraLoader"]
 
 
 class CameraSpec(BaseModel):

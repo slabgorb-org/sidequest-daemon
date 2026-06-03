@@ -34,6 +34,20 @@ import pytest
 _TESTS_DIR = Path(__file__).resolve().parent
 
 
+def _assert_sibling_test_lacks(filename: str, *symbols: str, hint: str) -> None:
+    """Assert a sibling test file no longer references any of ``symbols``.
+
+    Enforces "Delete Dead Code in the Same PR" — a test pointed at a deleted
+    export must be removed alongside it. Reports *which* symbol survived so a
+    failure says exactly what is still orphaned.
+    """
+    source = (_TESTS_DIR / filename).read_text()
+    survivors = [s for s in symbols if s in source]
+    assert not survivors, (
+        f"orphaned reference(s) {survivors} still in {filename} — {hint}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # AC1 — start_periodic_heartbeat is CUT (ADR-131 deferral note)
 # ---------------------------------------------------------------------------
@@ -80,11 +94,10 @@ def test_orphaned_periodic_heartbeat_isolation_test_removed() -> None:
     The *other* heartbeat tests in that file (per-connection accept/render
     heartbeats) must remain — see the preservation guard below.
     """
-    source = (_TESTS_DIR / "test_heartbeat_emit.py").read_text()
-    assert "start_periodic_heartbeat" not in source, (
-        "AC1: the orphaned periodic-heartbeat isolation test still "
-        "references start_periodic_heartbeat. Delete that test "
-        "(test_idle_daemon_emits_periodic_ready_heartbeat) in the same PR."
+    _assert_sibling_test_lacks(
+        "test_heartbeat_emit.py",
+        "start_periodic_heartbeat",
+        hint="delete test_idle_daemon_emits_periodic_ready_heartbeat in the same PR (AC1).",
     )
 
 
@@ -114,11 +127,11 @@ def test_orphaned_gpu_detect_span_test_removed() -> None:
     error on import — delete the class (and its section header) in the
     same PR. The Z-Image worker span tests in that file stay.
     """
-    source = (_TESTS_DIR / "test_otel_spans.py").read_text()
-    assert "gpu_detect" not in source and "detect_gpu" not in source, (
-        "AC2: test_otel_spans.py still references the deleted gpu_detect "
-        "module. Remove TestGpuDetectSpan and its section header in the "
-        "same PR."
+    _assert_sibling_test_lacks(
+        "test_otel_spans.py",
+        "gpu_detect",
+        "detect_gpu",
+        hint="remove TestGpuDetectSpan and its section header in the same PR (AC2).",
     )
 
 

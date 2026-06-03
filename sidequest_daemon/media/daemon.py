@@ -26,7 +26,7 @@ import tempfile
 import time
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sidequest_daemon.media.music_pipeline import MusicPipeline
@@ -114,9 +114,6 @@ class WorkerState(StrEnum):
     COLD = "cold"     # not warmed yet
 
 
-# Default cadence for the periodic idle heartbeat. Tests override.
-DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0
-
 # Backpressure-counters owned by the daemon. The image / embed in-flight
 # counts feed every heartbeat's ``queue_depth`` field so the server-side
 # mirror sees per-queue concurrent load even when no requests are in
@@ -150,43 +147,6 @@ def _write_heartbeat(writer: asyncio.StreamWriter, queue: str, state: str) -> No
         # Client went away before we could flush. Not fatal — the next
         # heartbeat target may still be alive.
         pass
-
-
-async def start_periodic_heartbeat(
-    *,
-    interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
-    emit: Callable[[dict], None | Awaitable[None]] | None = None,
-) -> None:
-    """Periodic ready-heartbeat emitter — long-running coroutine.
-
-    **NOT YET WIRED INTO ``_run_daemon``** (review H2 follow-up). The
-    coroutine is defined and unit-tested in isolation (AC2). Production
-    wiring of a broadcast emit (one that fans out to every active
-    client writer) is a follow-up. Until that lands, liveness is kept
-    fresh by:
-    - per-request heartbeats on every render/embed connection;
-    - the server-side ``DaemonClient.heartbeat_listener`` reconnecting
-      every ~15s (4× safety margin under the 60s unresponsive
-      threshold).
-
-    :param interval_seconds: Seconds between emits (default 30s; tests
-        use a much smaller value).
-    :param emit: Where the heartbeat goes. When wired, this will be a
-        broadcast helper that fans out to every active client writer.
-        Tests pass an in-memory recorder. ``None`` → no-op.
-    """
-    while True:
-        await asyncio.sleep(interval_seconds)
-        for queue in ("image", "embed"):
-            event = _make_heartbeat(queue, WorkerState.READY.value, _IN_FLIGHT_COUNTS.get(queue, 0))
-            if emit is None:
-                continue
-            try:
-                rv = emit(event)
-                if asyncio.iscoroutine(rv):
-                    await rv
-            except Exception:
-                log.exception("periodic_heartbeat.emit_failed queue=%s", queue)
 
 
 # Tier → worker routing.

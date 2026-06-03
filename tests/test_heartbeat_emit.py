@@ -356,68 +356,6 @@ async def test_embed_does_not_emit_image_busy_heartbeat(short_sock: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# AC2: periodic idle heartbeat
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_idle_daemon_emits_periodic_ready_heartbeat(short_sock: Path) -> None:
-    """AC2: with the daemon idle, a periodic ready heartbeat MUST
-    publish at the configured interval (default 30s). Tests use a
-    short test interval so the test runs in <2s.
-
-    The periodic emit lives on the asyncio loop running ``_run_daemon``
-    (lines 715–746 in the production daemon). The test exercises the
-    same loop with a short interval override, asserting two ready
-    emits land per two intervals."""
-    from sidequest_daemon.media import daemon as daemon_mod
-
-    # The implementation MUST expose a way to run the periodic emitter
-    # task in isolation so tests can drive it without booting the
-    # whole daemon. ``start_periodic_heartbeat`` (or equivalent) is
-    # the seam.
-    if not hasattr(daemon_mod, "start_periodic_heartbeat"):
-        pytest.fail(
-            "AC2: daemon module must expose start_periodic_heartbeat "
-            "or equivalent so the periodic emit is testable in isolation"
-        )
-
-    received: list[dict] = []
-
-    def _capture(event: dict) -> None:
-        received.append(event)
-
-    # Short interval so the test completes in well under a second.
-    task = asyncio.create_task(
-        daemon_mod.start_periodic_heartbeat(
-            interval_seconds=0.05,
-            emit=_capture,
-        )
-    )
-    try:
-        # Two intervals plus margin → at least two emits.
-        await asyncio.sleep(0.18)
-    finally:
-        task.cancel()
-        with contextlib.suppress(BaseException):
-            await task
-
-    ready_emits = [
-        e for e in received
-        if e.get("event") == "heartbeat" and e.get("state") == "ready"
-    ]
-    assert len(ready_emits) >= 2, (
-        f"AC2: expected ≥2 periodic ready heartbeats over two intervals; "
-        f"got {len(ready_emits)} ready emits, total events={len(received)}"
-    )
-    # Idle heartbeats must report queue_depth=0.
-    for e in ready_emits:
-        assert e.get("queue_depth") == 0, (
-            f"AC2: idle ready heartbeat must carry queue_depth=0, got {e}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # AC6: heartbeat lines do not corrupt per-request reply parsing
 # ---------------------------------------------------------------------------
 

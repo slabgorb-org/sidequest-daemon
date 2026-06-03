@@ -1,7 +1,7 @@
-"""Tests for OTEL span emission in ZImageMLXWorker and gpu_detect.
+"""Tests for OTEL span emission in ZImageMLXWorker.
 
 Verifies that the Z-Image MLX render pipeline emits OpenTelemetry spans
-so the GM panel can observe model loads, renders, warm-ups, and GPU detection.
+so the GM panel can observe model loads, renders, and warm-ups.
 """
 
 from __future__ import annotations
@@ -250,49 +250,7 @@ class TestWarmUpSpan:
 
 
 # ---------------------------------------------------------------------------
-# 4. detect_gpu() emits a span
-# ---------------------------------------------------------------------------
-
-class TestGpuDetectSpan:
-    """detect_gpu() must emit an OTEL span with backend and device info."""
-
-    def test_detect_gpu_creates_span(self, otel_exporter):
-        """detect_gpu() must create a 'gpu.detect' span."""
-        from sidequest_daemon.media.gpu_detect import detect_gpu
-
-        detect_gpu()
-
-        spans = otel_exporter.get_finished_spans()
-        gpu_spans = [s for s in spans if s.name == "gpu.detect"]
-        assert len(gpu_spans) >= 1, f"Expected 'gpu.detect' span, got: {[s.name for s in spans]}"
-
-    def test_detect_gpu_span_has_backend(self, otel_exporter):
-        """gpu.detect span must include backend attribute."""
-        from sidequest_daemon.media.gpu_detect import detect_gpu
-
-        result = detect_gpu()
-
-        spans = otel_exporter.get_finished_spans()
-        gpu_spans = [s for s in spans if s.name == "gpu.detect"]
-        attrs = dict(gpu_spans[-1].attributes)
-        assert "gpu.backend" in attrs
-        assert attrs["gpu.backend"] == result.backend
-
-    def test_detect_gpu_span_has_available(self, otel_exporter):
-        """gpu.detect span must include available attribute."""
-        from sidequest_daemon.media.gpu_detect import detect_gpu
-
-        result = detect_gpu()
-
-        spans = otel_exporter.get_finished_spans()
-        gpu_spans = [s for s in spans if s.name == "gpu.detect"]
-        attrs = dict(gpu_spans[-1].attributes)
-        assert "gpu.available" in attrs
-        assert attrs["gpu.available"] == result.available
-
-
-# ---------------------------------------------------------------------------
-# 5. Error spans — render failure records exception
+# 4. Error spans — render failure records exception
 # ---------------------------------------------------------------------------
 
 class TestErrorSpans:

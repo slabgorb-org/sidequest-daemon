@@ -730,6 +730,15 @@ async def _handle_client(
                         params["clip_prompt"] = composed.clip_prompt
                         params["negative_prompt"] = composed.negative_prompt
                         params["seed"] = composed.seed
+                        # Story 78-1: forward the resolved camera's post
+                        # directive (crop/rotate) so the worker applies it
+                        # after generation. JSON-dict form keeps params
+                        # socket-serializable; None when the camera sets none.
+                        params["post"] = (
+                            composed.post.model_dump()
+                            if composed.post is not None
+                            else None
+                        )
                         log.info(
                             "prompt_composed — positive=%s",
                             composed.positive_prompt[:150],

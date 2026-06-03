@@ -21,6 +21,7 @@ from sidequest_daemon.media.recipes import (
     LayerContribution,
     LOD,
     PlaceLOD,
+    PostDirective,
     RenderTarget,
 )
 from sidequest_daemon.media.zimage_config import get_zimage_config
@@ -199,6 +200,7 @@ class PromptComposer:
             layers=layers,
             dropped_layers=dropped,
             warnings=warnings,
+            post=self._resolve_post_directive(target),
         )
 
     def _downgrade_one_participant(self, plan: dict[str, LOD]) -> bool:
@@ -490,6 +492,23 @@ class PromptComposer:
             tokens=spec.prompt,
             estimated_tokens=_estimate_tokens(spec.prompt),
         )
+
+    def _resolve_post_directive(self, target: RenderTarget) -> PostDirective | None:
+        """The post-processing directive (if any) of the camera this target
+        resolves to — the same preset ``_resolve_direction_camera`` selects.
+
+        Carried on ``ComposedPrompt.post`` so the daemon can forward it to the
+        worker, which applies the crop/rotate after generation (Story 78-1).
+        Returns ``None`` when the resolved camera sets no ``post:`` directive.
+        """
+        recipe = self._recipes.get(target.kind)
+        if recipe.direction_camera == "{camera}":
+            if target.camera is None:
+                return None
+            preset = target.camera
+        else:
+            preset = CameraPreset(recipe.direction_camera)
+        return self._cameras.get(preset).post
 
     def _resolve_art_sensibility(
         self, target: RenderTarget

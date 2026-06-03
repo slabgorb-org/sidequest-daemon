@@ -171,6 +171,21 @@ class LayerContribution(BaseModel):
     estimated_tokens: int
 
 
+class PostDirective(BaseModel):
+    """Post-processing applied after the image renders.
+
+    Defined here (rather than in ``camera_specs``) so ``ComposedPrompt`` can
+    carry it without a circular import — ``camera_specs`` imports from
+    ``recipes``, not the reverse. Re-exported from ``camera_specs`` for
+    backward compatibility with existing importers.
+    """
+
+    kind: Literal["crop", "rotate"]
+    mode: Literal["center", "subject_center"] | None = None
+    percent: float | None = None  # crop
+    degrees: float | None = None  # rotate
+
+
 class ComposedPrompt(BaseModel):
     positive_prompt: str
     clip_prompt: str
@@ -180,6 +195,11 @@ class ComposedPrompt(BaseModel):
     layers: list[LayerContribution]
     dropped_layers: list[str]
     warnings: list[str]
+    # Camera post-processing directive resolved at compose time (Story 78-1).
+    # Forwarded by the daemon into render params so the worker can apply the
+    # crop/rotate the camera preset requested. None when the resolved camera
+    # sets no post directive.
+    post: PostDirective | None = None
 
 
 class CatalogMissError(Exception):

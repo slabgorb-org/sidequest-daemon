@@ -23,12 +23,14 @@ from sidequest_daemon.media.catalogs import (
     PlaceCatalog,
     StyleCatalog,
 )
+from sidequest_daemon.media.post_processor import apply_post, required_render_size
 from sidequest_daemon.media.prompt_composer import PromptComposer
 from sidequest_daemon.media.recipe_loader import RecipeLoader
 from sidequest_daemon.media.recipes import (
     LOD,
     CameraPreset,
     ComposedPrompt,
+    PostDirective,
     RenderConfigError,
     RenderTarget,
 )
@@ -429,6 +431,23 @@ class ZImageMLXWorker:
 
                 tier_cfg = get_zimage_config(tier, self.fidelity)
 
+                # Story 78-1: a camera preset may carry a post-processing
+                # directive (crop/rotate), forwarded by the daemon as a JSON
+                # dict in params["post"]. Validate it at this boundary (No
+                # Silent Fallbacks — a malformed directive must fail loud, not
+                # be silently ignored) and size the generation up so the crop/
+                # rotate has source pixels to consume; apply_post then trims
+                # the generated image back to the target after generate().
+                post_raw = params.get("post")
+                post_directive: PostDirective | None = (
+                    PostDirective.model_validate(post_raw)
+                    if post_raw is not None
+                    else None
+                )
+                gen_width, gen_height = required_render_size(
+                    (tier_cfg.width, tier_cfg.height), post_directive
+                )
+
                 # Caller-supplied inference-step override (send_render's
                 # `--steps` flag, carried as params["steps"]). When present it
                 # wins over the (tier, fidelity) default; when absent the tier
@@ -458,6 +477,16 @@ class ZImageMLXWorker:
                 span.set_attribute("render.seed", seed)
                 span.set_attribute("render.width", tier_cfg.width)
                 span.set_attribute("render.height", tier_cfg.height)
+                # Story 78-1: post-processing visibility for the GM panel —
+                # whether a camera post directive fired, and the oversized
+                # source it forced (source == target when no directive).
+                span.set_attribute("render.post_applied", post_directive is not None)
+                span.set_attribute(
+                    "render.post_kind",
+                    post_directive.kind if post_directive is not None else "",
+                )
+                span.set_attribute("render.source_width", gen_width)
+                span.set_attribute("render.source_height", gen_height)
                 # render.steps reports the steps ACTUALLY used; the two extra
                 # attributes let the GM panel see whether a caller override was
                 # in play and what the tier default would have been.
@@ -504,13 +533,18 @@ class ZImageMLXWorker:
                     prompt=prompt,
                     num_inference_steps=effective_steps,
                     guidance=guidance_arg,
-                    width=tier_cfg.width,
-                    height=tier_cfg.height,
+                    width=gen_width,
+                    height=gen_height,
                     scheduler=self.SCHEDULER,
                     negative_prompt=negative_prompt,
                 )
                 elapsed_ms = int((time.monotonic() - start) * 1000)
                 span.set_attribute("render.elapsed_ms", elapsed_ms)
+
+                # Story 78-1: apply the camera's crop/rotate to the generated
+                # (oversized) image before it is saved/uploaded. No-op when
+                # post_directive is None.
+                image = apply_post(image, post_directive)
 
                 filename = f"render_{uuid.uuid4().hex[:8]}.png"
                 image_path = self.output_dir / filename
@@ -555,6 +589,10 @@ class ZImageMLXWorker:
                     "image_url": str(image_path),  # legacy disk path —
                     # still emitted for in-flight back-compat during cutover
                     "r2_key": r2_key,
+                    # Target dimensions. apply_post crops the oversized source
+                    # back to the tier size (crop: gen ÷ percent × percent ==
+                    # tier), so the saved artifact matches these in production
+                    # regardless of the Story 78-1 post directive.
                     "width": tier_cfg.width,
                     "height": tier_cfg.height,
                     "elapsed_ms": elapsed_ms,

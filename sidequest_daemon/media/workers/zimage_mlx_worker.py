@@ -23,7 +23,11 @@ from sidequest_daemon.media.catalogs import (
     PlaceCatalog,
     StyleCatalog,
 )
-from sidequest_daemon.media.post_processor import apply_post, required_render_size
+from sidequest_daemon.media.post_processor import (
+    apply_post,
+    required_render_size,
+    supersample_downscale,
+)
 from sidequest_daemon.media.prompt_composer import PromptComposer
 from sidequest_daemon.media.recipe_loader import RecipeLoader
 from sidequest_daemon.media.recipes import (
@@ -431,6 +435,22 @@ class ZImageMLXWorker:
 
                 tier_cfg = get_zimage_config(tier, self.fidelity)
 
+                # Supersample validation (No Silent Fallbacks): the tier
+                # config's supersample_factor must be a positive integer; a
+                # value ≤ 0 or of the wrong type is a misconfiguration that
+                # must be caught loudly here, not swallowed or defaulted.
+                ss_factor = tier_cfg.supersample_factor
+                if (
+                    not isinstance(ss_factor, int)
+                    or isinstance(ss_factor, bool)
+                    or ss_factor <= 0
+                ):
+                    raise ValueError(
+                        f"tier {tier_name!r} has invalid supersample_factor="
+                        f"{ss_factor!r}; must be a positive int.  Fix the "
+                        f"ZImageTierConfig entry in zimage_config.py."
+                    )
+
                 # Story 78-1: a camera preset may carry a post-processing
                 # directive (crop/rotate), forwarded by the daemon as a JSON
                 # dict in params["post"]. Validate it at this boundary (No
@@ -444,9 +464,16 @@ class ZImageMLXWorker:
                     if post_raw is not None
                     else None
                 )
-                gen_width, gen_height = required_render_size(
+                # required_render_size expands to the crop/rotate envelope.
+                # We then multiply by supersample_factor so the generator
+                # renders at the supersampled resolution; both the post-
+                # directive envelope and the supersample scale are applied
+                # before the image goes into generate_image().
+                post_width, post_height = required_render_size(
                     (tier_cfg.width, tier_cfg.height), post_directive
                 )
+                gen_width = post_width * ss_factor
+                gen_height = post_height * ss_factor
 
                 # Caller-supplied inference-step override (send_render's
                 # `--steps` flag, carried as params["steps"]). When present it
@@ -487,18 +514,26 @@ class ZImageMLXWorker:
                 )
                 span.set_attribute("render.source_width", gen_width)
                 span.set_attribute("render.source_height", gen_height)
+                # Supersample visibility for the GM panel: whether the tier
+                # rendered at a higher internal resolution before Lanczos
+                # downscale.  factor=1 means the generator rendered straight
+                # to the target (no supersample applied).
+                span.set_attribute("render.supersample_factor", ss_factor)
+                span.set_attribute("render.supersample_applied", ss_factor > 1)
                 # render.steps reports the steps ACTUALLY used; the two extra
                 # attributes let the GM panel see whether a caller override was
                 # in play and what the tier default would have been.
                 span.set_attribute("render.steps", effective_steps)
                 span.set_attribute("render.steps_default", tier_cfg.steps)
-                span.set_attribute("render.steps_overridden", steps_override is not None)
+                span.set_attribute(
+                    "render.steps_overridden", steps_override is not None
+                )
                 span.set_attribute("render.guidance", tier_cfg.guidance)
                 span.set_attribute("render.prompt_length", len(prompt))
                 span.set_attribute("render.negative_length", len(negative_prompt or ""))
 
                 log.info(
-                    "ZIMAGE RENDER [%s] fidelity=%s seed=%s w=%s h=%s steps=%s%s",
+                    "ZIMAGE RENDER [%s] fidelity=%s seed=%s w=%s h=%s steps=%s%s%s",
                     tier_name,
                     self.fidelity,
                     seed,
@@ -507,6 +542,9 @@ class ZImageMLXWorker:
                     effective_steps,
                     f" (override; default {tier_cfg.steps})"
                     if steps_override is not None
+                    else "",
+                    f" (supersample×{ss_factor} → {gen_width}×{gen_height})"
+                    if ss_factor > 1
                     else "",
                 )
                 log.info("  prompt: %s", prompt[:150])
@@ -545,6 +583,20 @@ class ZImageMLXWorker:
                 # (oversized) image before it is saved/uploaded. No-op when
                 # post_directive is None.
                 image = apply_post(image, post_directive)
+
+                # Supersample downscale: when the tier's supersample_factor > 1
+                # the generator rendered at a higher internal resolution
+                # (gen_width × gen_height) and apply_post trimmed it to the
+                # post-directive envelope.  We now Lanczos-downscale from the
+                # post-directive envelope to the final target resolution
+                # (tier_cfg.width × tier_cfg.height).  Factor=1 is a true
+                # no-op — this branch is not entered, no resize is performed.
+                if ss_factor > 1:
+                    image = supersample_downscale(
+                        image,
+                        target_width=tier_cfg.width,
+                        target_height=tier_cfg.height,
+                    )
 
                 filename = f"render_{uuid.uuid4().hex[:8]}.png"
                 image_path = self.output_dir / filename

@@ -71,43 +71,74 @@ VALID_FIDELITIES: tuple[Fidelity, ...] = ("turbo", "high_fidelity")
 
 @dataclass(frozen=True)
 class ZImageTierConfig:
-    """Z-Image generation parameters for a specific render tier."""
+    """Z-Image generation parameters for a specific render tier.
+
+    ``supersample_factor`` controls optional supersampling before encode:
+    the generator renders at ``width * factor`` × ``height * factor`` and
+    the worker Lanczos-downscales the result back to ``(width, height)``
+    before saving/uploading.  Factor 1 is a true no-op (no resize step is
+    applied).  Any other positive integer multiplies both axes.  A value
+    ≤ 0 or non-integer is rejected loudly at render time (No Silent
+    Fallbacks).
+    """
 
     steps: int
     guidance: float
     width: int
     height: int
     model_variant: str
+    supersample_factor: int = 1
 
 
 ZIMAGE_TIER_CONFIGS: dict[RenderTier, ZImageTierConfig] = {
     RenderTier.SCENE_ILLUSTRATION: ZImageTierConfig(
-        steps=_TURBO_STEPS, guidance=_TURBO_GUIDANCE,
-        width=1024, height=768, model_variant=ZIMAGE_MODEL_VARIANT,
+        steps=_TURBO_STEPS,
+        guidance=_TURBO_GUIDANCE,
+        width=1024,
+        height=768,
+        model_variant=ZIMAGE_MODEL_VARIANT,
     ),
     RenderTier.PORTRAIT: ZImageTierConfig(
-        steps=_TURBO_STEPS, guidance=_TURBO_GUIDANCE,
-        width=768, height=1024, model_variant=ZIMAGE_MODEL_VARIANT,
+        steps=_TURBO_STEPS,
+        guidance=_TURBO_GUIDANCE,
+        width=768,
+        height=1024,
+        model_variant=ZIMAGE_MODEL_VARIANT,
     ),
     RenderTier.PORTRAIT_SQUARE: ZImageTierConfig(
-        steps=_TURBO_STEPS, guidance=_TURBO_GUIDANCE,
-        width=1024, height=1024, model_variant=ZIMAGE_MODEL_VARIANT,
+        steps=_TURBO_STEPS,
+        guidance=_TURBO_GUIDANCE,
+        width=1024,
+        height=1024,
+        model_variant=ZIMAGE_MODEL_VARIANT,
     ),
     RenderTier.LANDSCAPE: ZImageTierConfig(
-        steps=_TURBO_STEPS, guidance=_TURBO_GUIDANCE,
-        width=1024, height=768, model_variant=ZIMAGE_MODEL_VARIANT,
+        steps=_TURBO_STEPS,
+        guidance=_TURBO_GUIDANCE,
+        width=1024,
+        height=768,
+        model_variant=ZIMAGE_MODEL_VARIANT,
     ),
     RenderTier.TEXT_OVERLAY: ZImageTierConfig(
-        steps=_TURBO_STEPS, guidance=_TURBO_GUIDANCE,
-        width=768, height=512, model_variant=ZIMAGE_MODEL_VARIANT,
+        steps=_TURBO_STEPS,
+        guidance=_TURBO_GUIDANCE,
+        width=768,
+        height=512,
+        model_variant=ZIMAGE_MODEL_VARIANT,
     ),
     RenderTier.CARTOGRAPHY: ZImageTierConfig(
-        steps=_TURBO_STEPS, guidance=_TURBO_GUIDANCE,
-        width=1024, height=1024, model_variant=ZIMAGE_MODEL_VARIANT,
+        steps=_TURBO_STEPS,
+        guidance=_TURBO_GUIDANCE,
+        width=1024,
+        height=1024,
+        model_variant=ZIMAGE_MODEL_VARIANT,
     ),
     RenderTier.FOG_OF_WAR: ZImageTierConfig(
-        steps=_TURBO_STEPS, guidance=_TURBO_GUIDANCE,
-        width=1024, height=1024, model_variant=ZIMAGE_MODEL_VARIANT,
+        steps=_TURBO_STEPS,
+        guidance=_TURBO_GUIDANCE,
+        width=1024,
+        height=1024,
+        model_variant=ZIMAGE_MODEL_VARIANT,
     ),
 }
 
@@ -118,32 +149,53 @@ ZIMAGE_TIER_CONFIGS: dict[RenderTier, ZImageTierConfig] = {
 # so they're identical across every entry.
 ZIMAGE_HIGH_FIDELITY_TIER_CONFIGS: dict[RenderTier, ZImageTierConfig] = {
     RenderTier.SCENE_ILLUSTRATION: ZImageTierConfig(
-        steps=_HIGH_FIDELITY_STEPS, guidance=_HIGH_FIDELITY_GUIDANCE,
-        width=1024, height=768, model_variant=ZIMAGE_BASE_MODEL_VARIANT,
+        steps=_HIGH_FIDELITY_STEPS,
+        guidance=_HIGH_FIDELITY_GUIDANCE,
+        width=1024,
+        height=768,
+        model_variant=ZIMAGE_BASE_MODEL_VARIANT,
     ),
     RenderTier.PORTRAIT: ZImageTierConfig(
-        steps=_HIGH_FIDELITY_STEPS, guidance=_HIGH_FIDELITY_GUIDANCE,
-        width=1024, height=1024, model_variant=ZIMAGE_BASE_MODEL_VARIANT,
+        steps=_HIGH_FIDELITY_STEPS,
+        guidance=_HIGH_FIDELITY_GUIDANCE,
+        width=1024,
+        height=1024,
+        model_variant=ZIMAGE_BASE_MODEL_VARIANT,
     ),
     RenderTier.PORTRAIT_SQUARE: ZImageTierConfig(
-        steps=_HIGH_FIDELITY_STEPS, guidance=_HIGH_FIDELITY_GUIDANCE,
-        width=1024, height=1024, model_variant=ZIMAGE_BASE_MODEL_VARIANT,
+        steps=_HIGH_FIDELITY_STEPS,
+        guidance=_HIGH_FIDELITY_GUIDANCE,
+        width=1024,
+        height=1024,
+        model_variant=ZIMAGE_BASE_MODEL_VARIANT,
     ),
     RenderTier.LANDSCAPE: ZImageTierConfig(
-        steps=_HIGH_FIDELITY_STEPS, guidance=_HIGH_FIDELITY_GUIDANCE,
-        width=1024, height=768, model_variant=ZIMAGE_BASE_MODEL_VARIANT,
+        steps=_HIGH_FIDELITY_STEPS,
+        guidance=_HIGH_FIDELITY_GUIDANCE,
+        width=1024,
+        height=768,
+        model_variant=ZIMAGE_BASE_MODEL_VARIANT,
     ),
     RenderTier.TEXT_OVERLAY: ZImageTierConfig(
-        steps=_HIGH_FIDELITY_STEPS, guidance=_HIGH_FIDELITY_GUIDANCE,
-        width=768, height=512, model_variant=ZIMAGE_BASE_MODEL_VARIANT,
+        steps=_HIGH_FIDELITY_STEPS,
+        guidance=_HIGH_FIDELITY_GUIDANCE,
+        width=768,
+        height=512,
+        model_variant=ZIMAGE_BASE_MODEL_VARIANT,
     ),
     RenderTier.CARTOGRAPHY: ZImageTierConfig(
-        steps=_HIGH_FIDELITY_STEPS, guidance=_HIGH_FIDELITY_GUIDANCE,
-        width=1024, height=1024, model_variant=ZIMAGE_BASE_MODEL_VARIANT,
+        steps=_HIGH_FIDELITY_STEPS,
+        guidance=_HIGH_FIDELITY_GUIDANCE,
+        width=1024,
+        height=1024,
+        model_variant=ZIMAGE_BASE_MODEL_VARIANT,
     ),
     RenderTier.FOG_OF_WAR: ZImageTierConfig(
-        steps=_HIGH_FIDELITY_STEPS, guidance=_HIGH_FIDELITY_GUIDANCE,
-        width=1024, height=1024, model_variant=ZIMAGE_BASE_MODEL_VARIANT,
+        steps=_HIGH_FIDELITY_STEPS,
+        guidance=_HIGH_FIDELITY_GUIDANCE,
+        width=1024,
+        height=1024,
+        model_variant=ZIMAGE_BASE_MODEL_VARIANT,
     ),
 }
 

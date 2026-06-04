@@ -43,6 +43,37 @@ def _rotate_inscribed(img: Image.Image, degrees: float) -> Image.Image:
     return rotated.crop((left, top, left + new_w, top + new_h))
 
 
+def supersample_downscale(
+    img: Image.Image,
+    target_width: int,
+    target_height: int,
+) -> Image.Image:
+    """Downscale ``img`` to ``(target_width, target_height)`` with Lanczos.
+
+    Called after generation when a tier's ``supersample_factor > 1`` has
+    caused the generator to render at a higher internal resolution.  Lanczos
+    anti-aliases the high-frequency line patterns (engraving, cross-hatch,
+    halftone) before they reach the final raster — dissolving moiré.
+
+    Factor=1 callers must NOT invoke this function (the worker skips it as a
+    true no-op); the guard here is a defensive belt-and-suspenders check.
+
+    Raises ``ValueError`` if the target dimensions are not smaller than the
+    source (enforces the correct call contract — this function is a
+    *downscale*, not a resize).
+    """
+    src_w, src_h = img.size
+    if target_width > src_w or target_height > src_h:
+        raise ValueError(
+            f"supersample_downscale: target ({target_width}×{target_height}) "
+            f"is larger than source ({src_w}×{src_h}); this is a downscale "
+            f"operation only.  Check that supersample_factor > 1."
+        )
+    if target_width == src_w and target_height == src_h:
+        return img
+    return img.resize((target_width, target_height), Image.LANCZOS)
+
+
 def required_render_size(
     target_size: tuple[int, int],
     directive: PostDirective | None,

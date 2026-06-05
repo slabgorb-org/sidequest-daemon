@@ -265,6 +265,48 @@ def _extract_combat_subject(narrative: str, character_names: list[str]) -> str:
     return _truncate(_distill_visual(clean) or clean)
 
 
+def _strip_proper_nouns(subject: str, known_names: list[str], *, max_keep: int = 1) -> str:
+    """Cap named-entity density in a render subject (EH-2 scrapbook craft, 2026-06-05).
+
+    Operator note: scrapbook scene prompts carried too many proper nouns (named
+    NPCs like "Padre Ferreira" / "Noriko Nishida"), which mean nothing to
+    Z-Image — they consume the token budget and over-constrain the look, crowding
+    out the visual/compositional nouns that actually steer the model ("economy of
+    names"). Keep at most ``max_keep`` DISTINCT known character names (the first to
+    appear, so the subject keeps one anchor), drop the rest, and normalize the
+    residual punctuation/whitespace.
+
+    Deterministic and roster-bounded: it only removes names from ``known_names``
+    (the scene's present characters), never visual nouns or unknown words. Place
+    names — which the daemon cannot enumerate — are handled upstream by the LLM
+    extractor prompt's proper-noun guidance. A subject already within the density
+    budget is returned unchanged."""
+    if not subject or not known_names:
+        return subject
+    low = subject.lower()
+    appearances: list[tuple[int, str]] = []
+    for name in known_names:
+        name = name.strip()
+        if not name:
+            continue
+        idx = low.find(name.lower())
+        if idx >= 0:
+            appearances.append((idx, name))
+    if len(appearances) <= max_keep:
+        return subject
+    appearances.sort(key=lambda t: t[0])
+    drop = {name for _, name in appearances[max_keep:]}
+    out = subject
+    for name in drop:
+        out = re.sub(rf"\b{re.escape(name)}\b", "", out, flags=re.IGNORECASE)
+    # Normalize the gaps the removals leave behind.
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)  # " ," -> ","
+    out = re.sub(r"([,;:])(\s*[,;:])+", r"\1", out)  # collapse runs of separators
+    out = re.sub(r"(:\s*),", r"\1", out)  # "positions: ," -> "positions:"
+    out = re.sub(r"\s{2,}", " ", out)  # collapse double spaces
+    return out.strip().strip(",").strip()
+
+
 def _extract_portrait_subject(narrative: str) -> str:
     """Extract the character description sentence for PORTRAIT."""
     clean = re.sub(r'\*+|—|_', '', narrative).strip()
@@ -436,7 +478,10 @@ class SceneInterpreter:
             if tier is not None:
                 llm_cue = StageCue(
                     tier=tier,
-                    subject=llm_result["subject"],
+                    # EH-2 (2026-06-05): cap named-entity density even on the LLM
+                    # path — the extractor prompt now discourages proper nouns,
+                    # but this is the deterministic backstop for the known roster.
+                    subject=_strip_proper_nouns(llm_result["subject"], character_names),
                     mood=llm_result.get("mood", ""),
                     tags=llm_result.get("tags", []),
                     location=state.location,
@@ -565,6 +610,12 @@ class SceneInterpreter:
                 if cue.tier == RenderTier.LANDSCAPE:
                     self.last_rendered_location = current_location if current_location else cue.location
                     break
+
+        # EH-2 (2026-06-05): cap named-entity density on every rule-built subject
+        # too (the combat builder deliberately leads with combatant names). Lead
+        # with the visual action; keep one name as an anchor, drop the rest.
+        for cue in cues:
+            cue.subject = _strip_proper_nouns(cue.subject, character_names)
 
         return cues[:_MAX_CUES]
 

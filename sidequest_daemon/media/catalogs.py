@@ -253,10 +253,14 @@ class StyleCatalog:
         genre_tokens: dict[str, str],
         world_tokens: dict[tuple[str, str], str],
         culture_tokens: dict[tuple[str, str, str], str],
+        world_portrait_tokens: dict[tuple[str, str], str] | None = None,
     ) -> None:
         self._genre = genre_tokens
         self._world = world_tokens
         self._culture = culture_tokens
+        # Optional portrait-only world suffix (``portrait_positive_suffix``);
+        # absent for worlds that don't declare one.
+        self._world_portrait = world_portrait_tokens or {}
 
     @classmethod
     def load(
@@ -269,6 +273,7 @@ class StyleCatalog:
         genre_tokens: dict[str, str] = {}
         world_tokens: dict[tuple[str, str], str] = {}
         culture_tokens: dict[tuple[str, str, str], str] = {}
+        world_portrait_tokens: dict[tuple[str, str], str] = {}
 
         genre_style = genre_packs_root / genre / "visual_style.yaml"
         # Pack-level (genre) visual_style is OPTIONAL (2026-05-29 directive —
@@ -312,6 +317,24 @@ class StyleCatalog:
             )
         world_tokens[(genre, world)] = suffix
 
+        # Optional portrait-only suffix. A close-subject portrait may want a
+        # denser engraving / crowd-suppression style the landscape suffix omits.
+        # Absent = fall back to positive_suffix (every existing world unchanged);
+        # present-but-empty is a broken config and fails loud (No Silent
+        # Fallbacks).
+        portrait_suffix = data.get("portrait_positive_suffix")
+        if portrait_suffix is not None:
+            if not str(portrait_suffix).strip():
+                raise StyleMissError(
+                    scope="world",
+                    identifier=f"{genre}/{world}",
+                    reason=(
+                        f"empty portrait_positive_suffix in {world_style} "
+                        f"(remove the key to fall back to positive_suffix)"
+                    ),
+                )
+            world_portrait_tokens[(genre, world)] = portrait_suffix
+
         # Cultures (world-scoped — per spec)
         cultures_dir = genre_packs_root / genre / "worlds" / world / "cultures"
         if cultures_dir.is_dir():
@@ -320,7 +343,9 @@ class StyleCatalog:
                 slug = culture_file.stem
                 culture_tokens[(genre, world, slug)] = data.get("visual_tokens", "")
 
-        return cls(genre_tokens, world_tokens, culture_tokens)
+        return cls(
+            genre_tokens, world_tokens, culture_tokens, world_portrait_tokens
+        )
 
     def get_genre(self, genre: str) -> str:
         if genre not in self._genre:
@@ -335,6 +360,11 @@ class StyleCatalog:
                 reason="not present in StyleCatalog",
             )
         return self._world[(genre, world)]
+
+    def get_world_portrait(self, genre: str, world: str) -> str | None:
+        """Portrait-only world suffix, or None when the world declares none
+        (caller falls back to ``get_world``)."""
+        return self._world_portrait.get((genre, world))
 
     def get_culture(self, genre: str, world: str, culture: str) -> str:
         key = (genre, world, culture)

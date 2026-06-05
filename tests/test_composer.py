@@ -678,3 +678,119 @@ def test_golden_illustration_topdown(composer: PromptComposer) -> None:
         "illustration_topdown_90.txt",
         composer.compose(t).positive_prompt + "\n",
     )
+
+
+# ---------------------------------------------------------------------------
+# House "solo character focus" clause is a single-subject directive — it must
+# reach portraits and illustrations but NOT POI landscapes (2026-06-04 fix:
+# the clause was leaking onto every wry_whimsy/wonderland POI and fighting the
+# wide establishing framing).
+# ---------------------------------------------------------------------------
+
+def test_poi_omits_house_solo_character_clause(composer: PromptComposer) -> None:
+    t = RenderTarget(
+        kind="poi", world="testworld", genre="testgenre",
+        place="where:testworld/the_lookout",
+    )
+    prompt = composer.compose(t).positive_prompt
+    assert "solo character focus" not in prompt
+    assert "detailed distinctive features" not in prompt
+
+
+def test_portrait_retains_house_solo_character_clause(
+    composer: PromptComposer,
+) -> None:
+    t = RenderTarget(
+        kind="portrait", world="testworld", genre="testgenre",
+        character="npc:rux",
+    )
+    assert (
+        "solo character focus, detailed distinctive features"
+        in composer.compose(t).positive_prompt
+    )
+
+
+def test_illustration_retains_house_solo_character_clause(
+    composer: PromptComposer,
+) -> None:
+    t = RenderTarget(
+        kind="illustration", world="testworld", genre="testgenre",
+        participants=["npc:rux"], action="thinking",
+        location="where:testgenre/tavern", camera=CameraPreset.scene,
+    )
+    assert (
+        "solo character focus, detailed distinctive features"
+        in composer.compose(t).positive_prompt
+    )
+
+
+# ---------------------------------------------------------------------------
+# portrait_positive_suffix — a world may declare a portrait-only style suffix
+# (denser engraving + crowd suppression for close subjects) distinct from the
+# shared positive_suffix used by POIs/illustrations. Wired into the daemon's
+# catalog-compose path (render_common honored it only in the dead legacy path).
+# Backwards-compatible: a world without the field falls back to positive_suffix.
+# ---------------------------------------------------------------------------
+
+def test_style_catalog_reads_portrait_positive_suffix(tmp_path: Path) -> None:
+    world_dir = tmp_path / "g" / "worlds" / "w"
+    world_dir.mkdir(parents=True)
+    (world_dir / "visual_style.yaml").write_text(
+        "positive_suffix: SHARED SUFFIX\n"
+        "portrait_positive_suffix: PORTRAIT ONLY SUFFIX\n"
+    )
+    cat = StyleCatalog.load(tmp_path, genre="g", world="w")
+    assert cat.get_world("g", "w") == "SHARED SUFFIX"
+    assert cat.get_world_portrait("g", "w") == "PORTRAIT ONLY SUFFIX"
+
+
+def test_style_catalog_portrait_suffix_absent_returns_none(
+    tmp_path: Path,
+) -> None:
+    world_dir = tmp_path / "g" / "worlds" / "w"
+    world_dir.mkdir(parents=True)
+    (world_dir / "visual_style.yaml").write_text(
+        "positive_suffix: SHARED SUFFIX\n"
+    )
+    cat = StyleCatalog.load(tmp_path, genre="g", world="w")
+    assert cat.get_world_portrait("g", "w") is None
+
+
+def test_portrait_prefers_portrait_positive_suffix() -> None:
+    base = StyleCatalog.load(FIXTURE_ROOT, genre="testgenre", world="testworld")
+    styles = StyleCatalog(
+        genre_tokens=base._genre,
+        world_tokens=base._world,
+        culture_tokens=base._culture,
+        world_portrait_tokens={
+            ("testgenre", "testworld"): "PORTRAIT ENGRAVING SUFFIX"
+        },
+    )
+    comp = PromptComposer(
+        recipes=RecipeLoader.from_file(REPO_ROOT / "recipes.yaml"),
+        cameras=CameraLoader.from_file(REPO_ROOT / "cameras.yaml"),
+        characters=CharacterCatalog.load(
+            FIXTURE_ROOT, genre="testgenre", world="testworld"
+        ),
+        places=PlaceCatalog.load(
+            FIXTURE_ROOT, genre="testgenre", world="testworld"
+        ),
+        styles=styles,
+    )
+    portrait = comp.compose(
+        RenderTarget(
+            kind="portrait", world="testworld", genre="testgenre",
+            character="npc:rux",
+        )
+    ).positive_prompt
+    assert "PORTRAIT ENGRAVING SUFFIX" in portrait
+    assert "weathered surfaces" not in portrait
+
+    poi = comp.compose(
+        RenderTarget(
+            kind="poi", world="testworld", genre="testgenre",
+            place="where:testworld/the_lookout",
+        )
+    ).positive_prompt
+    assert "weathered surfaces" in poi
+    assert "PORTRAIT ENGRAVING SUFFIX" not in poi

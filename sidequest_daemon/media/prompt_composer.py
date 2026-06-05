@@ -127,7 +127,7 @@ class PromptComposer:
                 breakdown={lay.slot: lay.estimated_tokens for lay in layers},
             )
 
-        positive = self._assemble(layers)
+        positive = self._assemble(layers, target)
         clip = self._build_clip(layers)
         negative = self._build_negative(target)
 
@@ -531,7 +531,19 @@ class PromptComposer:
         # (carry their own no-text/safety clause).
         world_text = ""
         if "WORLD" in recipe.art_sensibility:
-            world_text = self._styles.get_world(target.genre, target.world)
+            # A portrait is a close subject: a world may declare a portrait-only
+            # suffix (denser engraving, crowd suppression) distinct from the
+            # shared positive_suffix POIs/illustrations use. Prefer it for
+            # portraits; fall back to the shared suffix when absent so every
+            # existing world keeps its current behavior.
+            world_text = ""
+            if target.kind == "portrait":
+                world_text = (
+                    self._styles.get_world_portrait(target.genre, target.world)
+                    or ""
+                )
+            if not world_text:
+                world_text = self._styles.get_world(target.genre, target.world)
 
         for layer_name in recipe.art_sensibility:
             if layer_name == "GENRE":
@@ -591,7 +603,9 @@ class PromptComposer:
                 seen.append(c)
         return seen
 
-    def _assemble(self, layers: list[LayerContribution]) -> str:
+    def _assemble(
+        self, layers: list[LayerContribution], target: RenderTarget
+    ) -> str:
         # Order: GENRE, WORLD, CASTING, LOCATION, DIRECTION_ACTION,
         # DIRECTION_CAMERA, CULTURE, safety clause.
         by_slot: dict[str, list[str]] = {}
@@ -612,7 +626,13 @@ class PromptComposer:
             if slot in by_slot:
                 ordered.extend(by_slot[slot])
 
-        ordered.append(_HOUSE_SAFETY_CLAUSE)
+        # The house clause ("solo character focus, detailed distinctive
+        # features") is a SINGLE-SUBJECT directive — correct for a portrait or
+        # an illustration's focal cast, but it fights a POI's wide environmental
+        # framing (it leaked onto every wonderland POI, 2026-06-04). POIs are
+        # places, not characters: omit it for the poi kind.
+        if target.kind != "poi":
+            ordered.append(_HOUSE_SAFETY_CLAUSE)
         return ", ".join(ordered)
 
     def _build_clip(self, layers: list[LayerContribution]) -> str:

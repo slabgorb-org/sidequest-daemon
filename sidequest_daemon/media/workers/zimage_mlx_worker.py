@@ -13,6 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
+import mlx.core as mx
 from opentelemetry import trace
 
 from sidequest_daemon.media import r2_writer
@@ -47,6 +48,10 @@ from sidequest_daemon.media.zimage_config import (
 from sidequest_daemon.renderer.models import RenderTier, StageCue
 
 _FIDELITY_ENV_VAR = "SIDEQUEST_DAEMON_FIDELITY"
+# MLX allocator free-buffer cache ceiling, in GiB (ping-pong 2026-06-07).
+# "0" disables buffer retention entirely; unset means the explicit 8 GiB
+# default. See ZImageMLXWorker._configure_mlx_cache_limit.
+_CACHE_LIMIT_ENV_VAR = "SIDEQUEST_MLX_CACHE_LIMIT_GB"
 
 log = logging.getLogger(__name__)
 
@@ -332,6 +337,12 @@ class ZImageMLXWorker:
         self.model_variant: str = get_zimage_config(
             RenderTier.PORTRAIT, self.fidelity
         ).model_variant
+        # Ping-pong 2026-06-07: bound the MLX allocator's free-buffer cache.
+        # Without a limit MLX retains every freed buffer until process exit —
+        # a portrait sweep climbed phys_footprint to 70GB+. The limit caps
+        # intra-render retention; clear_cache() in render()/warm_up() returns
+        # buffers to the OS between generations.
+        self.cache_limit_bytes: int = self._configure_mlx_cache_limit()
         type(self)._instance = self
 
     @staticmethod
@@ -351,6 +362,36 @@ class ZImageMLXWorker:
                 f"fall back to 'high_fidelity' — fix the env var or unset it."
             )
         return raw  # type: ignore[return-value]
+
+    @staticmethod
+    def _configure_mlx_cache_limit() -> int:
+        """Bound the MLX allocator's free-buffer cache; return the byte limit.
+
+        Reads ``SIDEQUEST_MLX_CACHE_LIMIT_GB`` (default ``8``; ``0`` disables
+        buffer retention entirely). A malformed or negative value refuses
+        construction loudly (No Silent Fallbacks) — a typo'd memory ceiling
+        must not silently become "unbounded".
+        """
+        raw = os.environ.get(_CACHE_LIMIT_ENV_VAR, "8")
+        try:
+            limit_gb = float(raw)
+        except ValueError:
+            limit_gb = -1.0  # falls through to the loud raise below
+        if limit_gb < 0:
+            raise ValueError(
+                f"{_CACHE_LIMIT_ENV_VAR}={raw!r} is not a non-negative number "
+                f"of GiB. Refusing to silently fall back to the default — "
+                f"fix the env var or unset it."
+            )
+        limit_bytes = int(limit_gb * 2**30)
+        mx.set_cache_limit(limit_bytes)
+        log.info(
+            "MLX cache limit set to %s GiB (%s bytes)%s",
+            limit_gb,
+            limit_bytes,
+            " — buffer retention disabled" if limit_bytes == 0 else "",
+        )
+        return limit_bytes
 
     def load_model(self) -> None:
         """Load the configured Z-Image variant via mflux."""
@@ -388,20 +429,25 @@ class ZImageMLXWorker:
             )
         tracer = trace.get_tracer("sidequest_daemon.media.workers.zimage_mlx_worker")
         with tracer.start_as_current_span("zimage_mlx.warm_up") as span:
-            start = time.monotonic()
-            self.model.generate_image(  # type: ignore[attr-defined]
-                seed=0,
-                prompt="black",
-                num_inference_steps=2,
-                guidance=None,
-                width=512,
-                height=512,
-                scheduler=self.SCHEDULER,
-                negative_prompt=None,
-            )
-            elapsed_ms = int((time.monotonic() - start) * 1000)
-            span.set_attribute("warmup.elapsed_ms", elapsed_ms)
-            return {"warmup_ms": elapsed_ms}
+            try:
+                start = time.monotonic()
+                self.model.generate_image(  # type: ignore[attr-defined]
+                    seed=0,
+                    prompt="black",
+                    num_inference_steps=2,
+                    guidance=None,
+                    width=512,
+                    height=512,
+                    scheduler=self.SCHEDULER,
+                    negative_prompt=None,
+                )
+                elapsed_ms = int((time.monotonic() - start) * 1000)
+                span.set_attribute("warmup.elapsed_ms", elapsed_ms)
+                return {"warmup_ms": elapsed_ms}
+            finally:
+                # The warm-up dummy generation allocates real buffers; release
+                # them so the post-warmup resident set is the model weights.
+                self._clear_mlx_cache(span)
 
     def render(self, params: dict) -> dict:
         """Generate image from StageCue params. Returns result dict."""
@@ -653,6 +699,26 @@ class ZImageMLXWorker:
                 span.set_status(trace.StatusCode.ERROR, str(exc))
                 span.record_exception(exc)
                 raise
+            finally:
+                # Ping-pong 2026-06-07: release the allocator's retained
+                # buffers after EVERY render — success or failure — so a
+                # render sweep's footprint stays at the model weights instead
+                # of climbing monotonically to 70GB+ and OOMing long batches.
+                self._clear_mlx_cache(span)
+
+    def _clear_mlx_cache(self, span: trace.Span) -> None:
+        """Return MLX's retained free buffers to the OS, span-visibly.
+
+        The span attributes are the lie-detector for the unbounded-cache fix
+        (house OTEL rule): the GM panel can watch ``mlx.cache_bytes_cleared``
+        per render instead of trusting that the allocator is bounded.
+        """
+        cache_bytes = mx.get_cache_memory()
+        mx.clear_cache()
+        span.set_attribute("mlx.cache_bytes_cleared", cache_bytes)
+        span.set_attribute("mlx.active_memory_bytes", mx.get_active_memory())
+        span.set_attribute("mlx.peak_memory_bytes", mx.get_peak_memory())
+        span.set_attribute("mlx.cache_limit_bytes", self.cache_limit_bytes)
 
     def _compose_prompt(self, params: dict) -> str:
         if params.get("positive_prompt"):

@@ -9,7 +9,6 @@ dependencies = [
     "mflux>=0.17.5",
     "transformers>=4.40",
     "safetensors>=0.4",
-    "pygame-ce>=2.5",
     "numpy>=1.24",
     "pedalboard>=0.9",
     "scipy>=1.11",

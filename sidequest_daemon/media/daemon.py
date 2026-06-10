@@ -6,7 +6,7 @@ Stays warm between sessions.
 
 Usage:
     sidequest-renderer                          # start daemon (loads Z-Image)
-    sidequest-renderer --warmup=flux            # start + load Z-Image only
+    sidequest-renderer --warmup=image           # start + load Z-Image only
     sidequest-renderer --no-warmup              # start without loading models (testing)
     sidequest-renderer --shutdown               # send shutdown to running daemon
     sidequest-renderer --status                 # check daemon status
@@ -216,7 +216,7 @@ class EmbedWorker:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
-            # Story 37-23: pin to CPU. MPS is reserved for Flux renders —
+            # Story 37-23: pin to CPU. MPS is reserved for Z-Image renders —
             # running embed on CPU gives it an independent device so the
             # embed path never contends with in-flight image generation
             # and can never re-trigger the 2026-04-10 concurrent-MPS-session
@@ -246,8 +246,8 @@ class WorkerPool:
         # Embed worker — singleton, owned by the pool. Constructed eagerly
         # at warmup, never per-request. Per-request construction was the
         # 2026-04-10 playtest deadlock root cause: a fresh SentenceTransformer
-        # download/MPS placement on every embed call, racing with Flux on
-        # the same MPS device.
+        # download/MPS placement on every embed call, racing with Z-Image
+        # on the same MPS device.
         self._embed: EmbedWorker | None = None
         self._embed_loaded = False
         self._embed_warmup_ms = 0
@@ -266,14 +266,6 @@ class WorkerPool:
         self._image_loaded = True
         log.info("Z-Image warm (%.1fs)", result.get("warmup_ms", 0) / 1000)
         return {"worker": "image", "status": "warm", **result}
-
-    def warm_up_flux(self) -> dict:
-        """Deprecated back-compat alias for warm_up_image().
-
-        Retained so the ``--warmup=flux`` CLI flag and existing RPC callers
-        that dispatch on ``worker="flux"`` keep working without refactoring.
-        """
-        return self.warm_up_image()
 
     def _ensure_image(self) -> None:
         if not self._image_loaded:
@@ -318,7 +310,7 @@ class WorkerPool:
         ``embed_lock`` before invoking (see ``_handle_client`` dispatch);
         this method itself does not take a lock. Embed runs on CPU (see
         ``EmbedWorker._load_model``) so it has an independent device from
-        Flux/MPS and cannot contend with in-flight image generation
+        Z-Image/MPS and cannot contend with in-flight image generation
         (story 37-23).
         """
         self._ensure_embed()
@@ -439,7 +431,7 @@ async def _handle_client(
                 try:
                     target = params.get("worker", "all")
                     results = {}
-                    if target in ("all", "flux", "image"):
+                    if target in ("all", "image"):
                         results["image"] = await asyncio.to_thread(pool.warm_up_image)
                     if target in ("all", "embed"):
                         results["embed"] = await asyncio.to_thread(pool.warm_up_embed)
@@ -903,9 +895,9 @@ async def _handle_client(
                 # - Run on a worker thread via ``asyncio.to_thread`` to
                 #   keep the event loop unblocked during inference.
                 # - Acquire ``embed_lock`` (NOT ``render_lock``). Embed
-                #   runs on CPU and Flux runs on MPS — independent devices,
+                #   runs on CPU and Z-Image runs on MPS — independent devices,
                 #   independent locks. Under the old shared-lock design,
-                #   10ms embeds serialized behind 5–60s Flux renders; now
+                #   10ms embeds serialized behind 5–60s image renders; now
                 #   they run in parallel.
                 text = params.get("text", "")
                 if not text or not text.strip():
@@ -1032,7 +1024,7 @@ async def _run_daemon(
 ) -> None:
     """Start the daemon server.
 
-    warmup can be: False, True/"all", "flux"
+    warmup can be: False, True/"all", "image", "embed"
     """
     if output_dir is None:
         env_dir = os.environ.get("SIDEQUEST_OUTPUT_DIR")
@@ -1075,9 +1067,9 @@ async def _run_daemon(
     )
     pool = WorkerPool(output_dir)
     render_lock = asyncio.Lock()
-    # Story 37-23: embed gets its own lock. Flux runs on MPS (render_lock);
+    # Story 37-23: embed gets its own lock. Z-Image runs on MPS (render_lock);
     # embed runs on CPU (embed_lock). Independent devices, independent locks —
-    # a long Flux render no longer blocks a ~30ms embed request.
+    # a long image render no longer blocks a ~30ms embed request.
     embed_lock = asyncio.Lock()
 
     # Initialize music pipeline via factory.
@@ -1093,7 +1085,7 @@ async def _run_daemon(
 
     if warmup:
         target = warmup if isinstance(warmup, str) else "all"
-        if target in ("all", "flux"):
+        if target in ("all", "image"):
             log.info("Pre-loading Z-Image model...")
             await asyncio.to_thread(pool.warm_up_image)
         if target in ("all", "embed"):

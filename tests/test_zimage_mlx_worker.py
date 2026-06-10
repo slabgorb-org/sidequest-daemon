@@ -45,7 +45,8 @@ def test_tier_configs_match_render_tier_enum():
     assert "text_overlay" in expected
     assert "tactical_sketch" not in expected
     assert "fog_of_war" in expected
-    assert "cartography" in expected
+    # Story 101-1: CARTOGRAPHY removed (gone server-side 2026-04-28).
+    assert "cartography" not in expected
 
 
 def test_render_unknown_tier_raises(worker: ZImageMLXWorker):

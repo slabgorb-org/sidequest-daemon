@@ -13,8 +13,6 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from sidequest_daemon.media.recipes import CameraPreset
-
 
 class RenderTier(str, Enum):
     """Image generation tiers, each with distinct latency/quality tradeoffs."""
@@ -24,7 +22,6 @@ class RenderTier(str, Enum):
     PORTRAIT_SQUARE = "portrait_square"
     LANDSCAPE = "landscape"
     TEXT_OVERLAY = "text_overlay"
-    CARTOGRAPHY = "cartography"
     FOG_OF_WAR = "fog_of_war"
 
 
@@ -40,7 +37,7 @@ class StageCue(BaseModel):
     seed: int | None = None
     turn_id: int = 0
     metadata: dict[str, Any] = {}
-    camera: CameraPreset | None = None
+    camera: str | None = None
 
 
 class RenderResult(BaseModel):

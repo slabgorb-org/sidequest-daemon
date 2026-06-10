@@ -253,7 +253,6 @@ _TIER_TO_R2_KIND: dict[str, r2_writer.ArtifactKind] = {
     "landscape": "scenes",
     "scene_illustration": "scenes",
     "text_overlay": "scenes",
-    "cartography": "scenes",
     "fog_of_war": "scenes",
 }
 

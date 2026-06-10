@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from pathlib import Path
 from typing import Literal
 
@@ -20,9 +21,28 @@ from sidequest_daemon.media.recipes import (
 log = logging.getLogger(__name__)
 
 
+def _fold_to_ascii(text: str) -> str:
+    """NFKD-fold non-ASCII to base letters (Story 101-8 shared contract).
+
+    Mirror of ``sidequest.server.slug_fold.fold_to_ascii`` — the daemon is a
+    separate package and cannot import the server, so the rule is duplicated to
+    the same documented contract (output equality is pinned by the cross-repo
+    slug tests). Decompose with NFKD, drop combining marks: ``é→e``, ``á→a``.
+    Non-decomposing letters (``ł``, ``ø``, Cyrillic) pass through and are dropped
+    by the ``[^a-z0-9_-]`` filter below.
+    """
+    return "".join(
+        ch
+        for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
+
+
 def _slugify_name(name: str) -> str:
-    """Lowercase, collapse whitespace to `_`, drop punctuation except `_`/`-`."""
-    lowered = name.strip().lower()
+    """NFKD-fold non-ASCII, lowercase, collapse whitespace to `_`, drop punctuation
+    except `_`/`-`. The render-side R2 file namer; must agree with the server's
+    ``slugify_player_name`` (URL == filename). ASCII output unchanged by the fold."""
+    lowered = _fold_to_ascii(name).strip().lower()
     collapsed = re.sub(r"\s+", "_", lowered)
     return re.sub(r"[^a-z0-9_-]", "", collapsed)
 
@@ -183,8 +203,7 @@ class PlaceCatalog:
                 has_env = any(env.get(k) for k in ("solo", "backdrop"))
                 if not has_visual and not has_env:
                     log.info(
-                        "place_catalog.poi_skipped reason=no_visual "
-                        "world=%s slug=%s",
+                        "place_catalog.poi_skipped reason=no_visual world=%s slug=%s",
                         world,
                         slug,
                     )
@@ -343,9 +362,7 @@ class StyleCatalog:
                 slug = culture_file.stem
                 culture_tokens[(genre, world, slug)] = data.get("visual_tokens", "")
 
-        return cls(
-            genre_tokens, world_tokens, culture_tokens, world_portrait_tokens
-        )
+        return cls(genre_tokens, world_tokens, culture_tokens, world_portrait_tokens)
 
     def get_genre(self, genre: str) -> str:
         if genre not in self._genre:

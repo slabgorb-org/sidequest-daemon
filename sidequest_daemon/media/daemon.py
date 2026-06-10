@@ -156,7 +156,6 @@ IMAGE_TIERS = frozenset(
         "portrait",
         "portrait_square",
         "landscape",
-        "cartography",
         "text_overlay",
         "fog_of_war",
     }

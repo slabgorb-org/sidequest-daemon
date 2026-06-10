@@ -126,13 +126,6 @@ ZIMAGE_TIER_CONFIGS: dict[RenderTier, ZImageTierConfig] = {
         height=512,
         model_variant=ZIMAGE_MODEL_VARIANT,
     ),
-    RenderTier.CARTOGRAPHY: ZImageTierConfig(
-        steps=_TURBO_STEPS,
-        guidance=_TURBO_GUIDANCE,
-        width=1024,
-        height=1024,
-        model_variant=ZIMAGE_MODEL_VARIANT,
-    ),
     RenderTier.FOG_OF_WAR: ZImageTierConfig(
         steps=_TURBO_STEPS,
         guidance=_TURBO_GUIDANCE,
@@ -181,13 +174,6 @@ ZIMAGE_HIGH_FIDELITY_TIER_CONFIGS: dict[RenderTier, ZImageTierConfig] = {
         guidance=_HIGH_FIDELITY_GUIDANCE,
         width=768,
         height=512,
-        model_variant=ZIMAGE_BASE_MODEL_VARIANT,
-    ),
-    RenderTier.CARTOGRAPHY: ZImageTierConfig(
-        steps=_HIGH_FIDELITY_STEPS,
-        guidance=_HIGH_FIDELITY_GUIDANCE,
-        width=1024,
-        height=1024,
         model_variant=ZIMAGE_BASE_MODEL_VARIANT,
     ),
     RenderTier.FOG_OF_WAR: ZImageTierConfig(

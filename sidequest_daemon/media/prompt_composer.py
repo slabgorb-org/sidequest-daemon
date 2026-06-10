@@ -32,7 +32,7 @@ from sidequest_daemon.telemetry import emit_watcher_event as _emit_watcher_event
 # Z-Image config is keyed by ``RenderTier``. Map kind → a representative
 # tier so the composer can surface ``model_variant`` + ``steps`` on the
 # render.prompt_composed OTEL span. The mapping is lossy on width/height
-# (PORTRAIT_SQUARE vs PORTRAIT, CARTOGRAPHY vs LANDSCAPE) but matches on
+# (PORTRAIT_SQUARE vs PORTRAIT, FOG_OF_WAR vs LANDSCAPE) but matches on
 # the model_variant + steps axes that actually drive AC5.
 _KIND_TO_TIER: dict[str, RenderTier] = {
     "portrait": RenderTier.PORTRAIT,

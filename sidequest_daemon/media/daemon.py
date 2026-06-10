@@ -163,6 +163,26 @@ IMAGE_TIERS = frozenset(
 EMBED_TIERS = frozenset({"embed"})
 MUSIC_TIERS = frozenset({"music"})
 
+# Valid warmup targets for the `warm_up` RPC (`worker=`) and the `--warmup=` CLI
+# flag. "all" warms every worker; "image"/"embed" warm one. Any other value is
+# rejected loudly — a silent no-op here would let the daemon report "warm" while
+# serving cold (No Silent Fallbacks). The retired "flux" alias is deliberately
+# absent (ADR-070; story 101-5).
+WARMUP_TARGETS = frozenset({"all", "image", "embed"})
+
+
+def _validate_warmup_target(target: str) -> None:
+    """Raise ``ValueError`` if ``target`` is not a recognized warmup worker.
+
+    Fail-loud guard for the ``--warmup`` CLI flag. A bad value (a typo, or the
+    retired ``flux`` alias) must crash startup rather than let the daemon log
+    "Models warm and ready" while serving cold (No Silent Fallbacks).
+    """
+    if target not in WARMUP_TARGETS:
+        raise ValueError(
+            f"Unknown warmup target {target!r}; valid: {sorted(WARMUP_TARGETS)}"
+        )
+
 
 async def dispatch_request(
     request: dict,
@@ -430,6 +450,21 @@ async def _handle_client(
             elif method == "warm_up":
                 try:
                     target = params.get("worker", "all")
+                    if target not in WARMUP_TARGETS:
+                        # Fail loud: an unknown worker (e.g. the retired "flux")
+                        # must not return a success response with nothing warmed.
+                        _write(
+                            writer,
+                            req_id,
+                            error={
+                                "code": "UNKNOWN_WORKER",
+                                "message": (
+                                    f"Unknown warmup target {target!r}; "
+                                    f"valid: {sorted(WARMUP_TARGETS)}"
+                                ),
+                            },
+                        )
+                        continue
                     results = {}
                     if target in ("all", "image"):
                         results["image"] = await asyncio.to_thread(pool.warm_up_image)
@@ -1085,6 +1120,9 @@ async def _run_daemon(
 
     if warmup:
         target = warmup if isinstance(warmup, str) else "all"
+        # Fail loud at startup rather than logging "warm and ready" while
+        # serving cold. Catches the retired --warmup=flux and any typo.
+        _validate_warmup_target(target)
         if target in ("all", "image"):
             log.info("Pre-loading Z-Image model...")
             await asyncio.to_thread(pool.warm_up_image)

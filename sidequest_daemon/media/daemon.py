@@ -57,10 +57,11 @@ from sidequest_daemon.media.tiers import (
     WARMUP_TARGETS,
     _validate_warmup_target,
 )
-from sidequest_daemon.media.worker_pool import (
+from sidequest_daemon.media.worker_pool import (  # noqa: F401  (back-compat re-exports)
     _IN_FLIGHT_COUNTS,
     WorkerPool,
     WorkerState,
+    _make_heartbeat,
     _write_heartbeat,
 )
 
@@ -78,6 +79,12 @@ __all__ = [
     "send_shutdown",
     "send_status",
     "main",
+    # Back-compat re-exports — test_78_3 guards _make_heartbeat against
+    # over-deletion; the server's mirror + daemon tests import these names
+    # from this module path.
+    "_make_heartbeat",
+    "_write_heartbeat",
+    "_IN_FLIGHT_COUNTS",
 ]
 
 # Socket / PID paths default to the well-known /tmp locations. They are
@@ -381,7 +388,9 @@ async def _handle_client(
                                 req_id,
                                 error={
                                     "code": "GENERATION_FAILED",
-                                    "message": str(e),
+                                    # Truncate — an unexpected exception can carry
+                                    # local paths; don't forward verbatim (CWE-209).
+                                    "message": str(e)[:512],
                                 },
                             )
                         finally:

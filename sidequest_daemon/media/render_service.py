@@ -322,7 +322,10 @@ class RenderService:
             raise
         except Exception as e:
             log.exception("render.failed — tier=%s", params.get("tier", ""))
-            raise RenderError("GENERATION_FAILED", str(e)) from e
+            # Truncate like the COMPOSE_FAILED path — a worker exception can
+            # carry local file / model-weight paths that should not be
+            # forwarded verbatim over the JSON-RPC error frame (CWE-209).
+            raise RenderError("GENERATION_FAILED", str(e)[:512]) from e
 
         with tracer.start_as_current_span("render.completed") as completed:
             final_prompt = params.get("positive_prompt", "")

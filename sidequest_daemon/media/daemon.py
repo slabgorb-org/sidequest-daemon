@@ -4,6 +4,20 @@ Hosts the Z-Image worker in a single process with the model pre-loaded.
 Serves render requests over a Unix domain socket, routing by tier.
 Stays warm between sessions.
 
+This module is socket lifecycle + routing only (story 101-7). The worker
+pool, embed worker, per-queue heartbeats, and the image render pipeline
+live in sibling modules:
+
+    sidequest_daemon.media.tiers          — tier routing constants
+    sidequest_daemon.media.embed_worker   — EmbedWorker
+    sidequest_daemon.media.worker_pool    — WorkerPool, WorkerState, heartbeats
+    sidequest_daemon.media.render_service — RenderService (image compose+render)
+
+Those names are re-exported here for back-compat: the server's
+``DaemonStateMirror`` and the daemon's tests import ``WorkerPool``,
+``EmbedWorker``, ``WorkerState``, ``dispatch_request``, ``IMAGE_TIERS``,
+etc. from ``sidequest_daemon.media.daemon``.
+
 Usage:
     sidequest-renderer                          # start daemon (loads Z-Image)
     sidequest-renderer --warmup=image           # start + load Z-Image only
@@ -23,8 +37,6 @@ import os
 import signal
 import sys
 import tempfile
-import time
-from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,13 +45,47 @@ if TYPE_CHECKING:
 
 from opentelemetry import trace
 
-from sidequest_daemon.media.recipes import (
-    BudgetError,
-    CatalogMissError,
-    RenderConfigError,
-    StyleMissError,
+# --- Re-exported symbols (story 101-7 extraction) -------------------------
+# Existing consumers (server DaemonStateMirror, ~12 daemon test modules)
+# import these from this module path. Keep them importable here.
+from sidequest_daemon.media.embed_worker import EmbedWorker
+from sidequest_daemon.media.render_service import RenderError, RenderService
+from sidequest_daemon.media.tiers import (
+    EMBED_TIERS,
+    IMAGE_TIERS,
+    MUSIC_TIERS,
+    WARMUP_TARGETS,
+    _validate_warmup_target,
 )
-from sidequest_daemon.telemetry import emit_watcher_event as _emit_watcher_event
+from sidequest_daemon.media.worker_pool import (  # noqa: F401  (back-compat re-exports)
+    _IN_FLIGHT_COUNTS,
+    WorkerPool,
+    WorkerState,
+    _make_heartbeat,
+    _write_heartbeat,
+)
+
+__all__ = [
+    "EmbedWorker",
+    "RenderError",
+    "RenderService",
+    "WorkerPool",
+    "WorkerState",
+    "EMBED_TIERS",
+    "IMAGE_TIERS",
+    "MUSIC_TIERS",
+    "WARMUP_TARGETS",
+    "dispatch_request",
+    "send_shutdown",
+    "send_status",
+    "main",
+    # Back-compat re-exports — test_78_3 guards _make_heartbeat against
+    # over-deletion; the server's mirror + daemon tests import these names
+    # from this module path.
+    "_make_heartbeat",
+    "_write_heartbeat",
+    "_IN_FLIGHT_COUNTS",
+]
 
 # Socket / PID paths default to the well-known /tmp locations. They are
 # env-overridable (SIDEQUEST_RENDERER_SOCK / SIDEQUEST_RENDERER_PID) so a
@@ -95,105 +141,21 @@ tracer = trace.get_tracer("sidequest_daemon.media.daemon")
 
 log = logging.getLogger(__name__)
 
-# Story 45-31 — daemon worker heartbeat.
-#
-# The daemon emits ``{"event":"heartbeat", "queue": ..., "state": ...,
-# "queue_depth": ..., "ts_monotonic": ...}`` lines on every connection
-# state transition (accept, render-lock acquire/release, embed-lock
-# acquire/release) and on a periodic timer when idle. The server-side
-# ``DaemonStateMirror`` consumes these to track liveness without
-# polling — replacing the binary socket-on-disk check that swallowed
-# the Felix 13-minute silence (playtest 2026-04-19).
-class WorkerState(StrEnum):
-    """Heartbeat state values. Independent per queue (image vs. embed)
-    so a busy embed does not flag the image queue as busy."""
-
-    READY = "ready"   # warm, idle
-    BUSY = "busy"     # render_lock or embed_lock acquired
-    PAUSED = "paused"  # GPU coordinator gated the queue (ADR-046)
-    COLD = "cold"     # not warmed yet
-
-
-# Backpressure-counters owned by the daemon. The image / embed in-flight
-# counts feed every heartbeat's ``queue_depth`` field so the server-side
-# mirror sees per-queue concurrent load even when no requests are in
-# flight on the connection that's polling.
-_IN_FLIGHT_COUNTS: dict[str, int] = {"image": 0, "embed": 0}
-
-
-def _make_heartbeat(queue: str, state: str, queue_depth: int) -> dict:
-    """Build a heartbeat event payload with ``ts_monotonic`` stamped at
-    emit time. Centralized so the schema does not drift across the
-    six per-connection emission sites (accept × 2 queues, render-lock
-    acquire/release, embed-lock acquire/release) plus the periodic
-    emitter."""
-    return {
-        "event": "heartbeat",
-        "queue": queue,
-        "state": state,
-        "queue_depth": int(queue_depth),
-        "ts_monotonic": time.monotonic(),
-    }
-
-
-def _write_heartbeat(writer: asyncio.StreamWriter, queue: str, state: str) -> None:
-    """Emit a heartbeat line on a per-connection writer. Called inline
-    on the event loop — the writer is already protected by the
-    per-connection serialization in ``_handle_client``."""
-    payload = _make_heartbeat(queue, state, _IN_FLIGHT_COUNTS.get(queue, 0))
-    try:
-        writer.write((json.dumps(payload) + "\n").encode())
-    except (ConnectionResetError, BrokenPipeError):
-        # Client went away before we could flush. Not fatal — the next
-        # heartbeat target may still be alive.
-        pass
-
-
-# Tier → worker routing.
-IMAGE_TIERS = frozenset(
-    {
-        "scene_illustration",
-        "portrait",
-        "portrait_square",
-        "landscape",
-        "text_overlay",
-        "fog_of_war",
-    }
-)
-EMBED_TIERS = frozenset({"embed"})
-MUSIC_TIERS = frozenset({"music"})
-
-# Valid warmup targets for the `warm_up` RPC (`worker=`) and the `--warmup=` CLI
-# flag. "all" warms every worker; "image"/"embed" warm one. Any other value is
-# rejected loudly — a silent no-op here would let the daemon report "warm" while
-# serving cold (No Silent Fallbacks). The retired "flux" alias is deliberately
-# absent (ADR-070; story 101-5).
-WARMUP_TARGETS = frozenset({"all", "image", "embed"})
-
-
-def _validate_warmup_target(target: str) -> None:
-    """Raise ``ValueError`` if ``target`` is not a recognized warmup worker.
-
-    Fail-loud guard for the ``--warmup`` CLI flag. A bad value (a typo, or the
-    retired ``flux`` alias) must crash startup rather than let the daemon log
-    "Models warm and ready" while serving cold (No Silent Fallbacks).
-    """
-    if target not in WARMUP_TARGETS:
-        raise ValueError(
-            f"Unknown warmup target {target!r}; valid: {sorted(WARMUP_TARGETS)}"
-        )
-
 
 async def dispatch_request(
     request: dict,
     *,
     music_pipeline: "MusicPipeline | None" = None,
+    render_service: "RenderService | None" = None,
 ) -> dict:
     """Route a JSON-RPC render request to the right handler based on tier.
 
-    Routes `tier=music` to `music_pipeline.generate()`. Image tiers are
-    dispatched inline by `_handle_client` and never reach this function;
-    any other tier raises `ValueError` loudly (no silent fallback).
+    This is the single render-tier dispatch path (story 101-7). ``tier=music``
+    routes to ``music_pipeline.generate``; image tiers route to
+    ``render_service.render``; any other tier raises ``ValueError`` loudly
+    (No Silent Fallbacks). Image renders are invoked while ``_handle_client``
+    holds ``render_lock`` — the lock, dispatch span, and heartbeats stay at
+    the socket-dispatch site (story 37-23 / 45-31).
     """
     method = request.get("method")
     if method != "render":
@@ -218,171 +180,18 @@ async def dispatch_request(
             },
         }
 
+    # Image tiers route to the render service. An empty/unset tier also routes
+    # here: a narration-only request relies on SceneInterpreter (inside
+    # RenderService) to classify the tier — rejecting it as "unknown" would
+    # break the server-doesn't-classify fallback path. A *non-empty* tier that
+    # is neither music nor image is a genuine unknown and fails loud below.
+    if tier in IMAGE_TIERS or not tier:
+        if render_service is None:
+            raise RuntimeError("RenderService not initialized")
+        result = await render_service.render(params)
+        return {"id": request.get("id"), "result": result}
+
     raise ValueError(f"Unknown tier: {tier!r}")
-
-
-class EmbedWorker:
-    """Generates sentence embeddings via sentence-transformers (story 15-7).
-
-    Uses all-MiniLM-L6-v2 for 384-dimensional embeddings — fast and
-    good enough for lore fragment similarity search.
-    """
-
-    def __init__(self) -> None:
-        self._model = None
-        self._model_name = "all-MiniLM-L6-v2"
-
-    def _load_model(self):
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-
-            # Story 37-23: pin to CPU. MPS is reserved for Z-Image renders —
-            # running embed on CPU gives it an independent device so the
-            # embed path never contends with in-flight image generation
-            # and can never re-trigger the 2026-04-10 concurrent-MPS-session
-            # deadlock that story 37-5 originally fixed by sharing a lock.
-            self._model = SentenceTransformer(self._model_name, device="cpu")
-        return self._model
-
-    def generate_embedding(self, text: str) -> list[float]:
-        """Generate a sentence embedding for the given text.
-
-        Raises ValueError if text is empty — no silent fallbacks.
-        """
-        if not text or not text.strip():
-            raise ValueError("text must not be empty")
-        model = self._load_model()
-        embedding = model.encode(text, convert_to_numpy=True)
-        return [float(v) for v in embedding]
-
-
-class WorkerPool:
-    """Manages the Z-Image worker with lazy or eager loading."""
-
-    def __init__(self, output_dir: Path) -> None:
-        self.output_dir = output_dir
-        self._image = None
-        self._image_loaded = False
-        # Embed worker — singleton, owned by the pool. Constructed eagerly
-        # at warmup, never per-request. Per-request construction was the
-        # 2026-04-10 playtest deadlock root cause: a fresh SentenceTransformer
-        # download/MPS placement on every embed call, racing with Z-Image
-        # on the same MPS device.
-        self._embed: EmbedWorker | None = None
-        self._embed_loaded = False
-        self._embed_warmup_ms = 0
-        self.pipeline_factory = None  # Set by _run_daemon after init
-
-    def warm_up_image(self) -> dict:
-        """Load and warm up the Z-Image image renderer."""
-        if self._image_loaded:
-            return {"worker": "image", "status": "already_warm", "warmup_ms": 0}
-        from sidequest_daemon.media.workers.zimage_mlx_worker import ZImageMLXWorker
-
-        self._image = ZImageMLXWorker(self.output_dir / "zimage")
-        log.info("Loading Z-Image...")
-        self._image.load_model()
-        result = self._image.warm_up()
-        self._image_loaded = True
-        log.info("Z-Image warm (%.1fs)", result.get("warmup_ms", 0) / 1000)
-        return {"worker": "image", "status": "warm", **result}
-
-    def _ensure_image(self) -> None:
-        if not self._image_loaded:
-            self.warm_up_image()
-
-    def warm_up_embed(self) -> dict:
-        """Eagerly construct EmbedWorker and load its SentenceTransformer model.
-
-        Called once at daemon startup (when ``--warmup`` or ``--warmup=all``
-        is passed) and never again. The same instance is reused for every
-        subsequent embed request via ``pool.embed``.
-        """
-        if self._embed_loaded:
-            return {
-                "worker": "embed",
-                "status": "already_warm",
-                "warmup_ms": 0,
-                "model": "all-MiniLM-L6-v2",
-            }
-        start = time.monotonic()
-        log.info("Loading SentenceTransformer all-MiniLM-L6-v2 on CPU...")
-        self._embed = EmbedWorker()
-        self._embed._load_model()
-        self._embed_warmup_ms = int((time.monotonic() - start) * 1000)
-        self._embed_loaded = True
-        log.info("Embed worker warm (%.1fs)", self._embed_warmup_ms / 1000)
-        return {
-            "worker": "embed",
-            "status": "warm",
-            "warmup_ms": self._embed_warmup_ms,
-            "model": "all-MiniLM-L6-v2",
-        }
-
-    def _ensure_embed(self) -> None:
-        if not self._embed_loaded:
-            self.warm_up_embed()
-
-    def embed(self, text: str) -> list[float]:
-        """Generate a sentence embedding via the singleton EmbedWorker.
-
-        Synchronous — call from ``asyncio.to_thread``. The caller must hold
-        ``embed_lock`` before invoking (see ``_handle_client`` dispatch);
-        this method itself does not take a lock. Embed runs on CPU (see
-        ``EmbedWorker._load_model``) so it has an independent device from
-        Z-Image/MPS and cannot contend with in-flight image generation
-        (story 37-23).
-        """
-        self._ensure_embed()
-        assert self._embed is not None  # _ensure_embed populates it
-        return self._embed.generate_embedding(text)
-
-    def render(self, params: dict) -> dict:
-        """Route render request to the appropriate worker by tier."""
-        tier = params.get("tier", "")
-        if tier in IMAGE_TIERS:
-            self._ensure_image()
-            return self._image.render(params)
-        else:
-            raise ValueError(f"Unknown tier: {tier!r}")
-
-    def status(self) -> dict:
-        """Return current worker status.
-
-        Story 45-31: ``queue_states`` is provided for diagnostic
-        consumers (GM panel, ``/health``-style introspection); the
-        server-side ``DaemonStateMirror`` is populated from
-        per-connection heartbeat events, NOT from this field. Distinct
-        from the legacy ``image``/``embed`` keys which report
-        model-load status ("warm" vs. "cold").
-        """
-        image_loaded = self._image_loaded
-        embed_loaded = self._embed_loaded
-        return {
-            "image": "warm" if image_loaded else "cold",
-            "embed": "warm" if embed_loaded else "cold",
-            "queue_states": {
-                "image": (WorkerState.READY.value if image_loaded else WorkerState.COLD.value),
-                "embed": (WorkerState.READY.value if embed_loaded else WorkerState.COLD.value),
-            },
-            "queue_depths": dict(_IN_FLIGHT_COUNTS),
-            "supported_tiers": {
-                "image": sorted(IMAGE_TIERS),
-                "embed": sorted(EMBED_TIERS),
-            },
-        }
-
-    def cleanup(self) -> None:
-        """Release all models and clear GPU cache."""
-        if self._image is not None:
-            self._image.cleanup()
-            self._image = None
-            self._image_loaded = False
-        if self._embed is not None:
-            # SentenceTransformer has no explicit close — drop the reference
-            # so GC + MPS cache release happens.
-            self._embed = None
-            self._embed_loaded = False
 
 
 async def _handle_client(
@@ -480,16 +289,17 @@ async def _handle_client(
                         error={"code": "WARMUP_FAILED", "message": str(e)},
                     )
             elif method == "render":
+                tier = params.get("tier")
                 # Music-tier short-circuit. Music render requests have a
                 # totally different shape from image-tier requests
-                # (json_params_path, no narration / no game_state) — route
-                # them through dispatch_request before the image-tier
-                # logic touches params it doesn't understand.
-                if params.get("tier") in MUSIC_TIERS:
+                # (json_params_path, no narration / no game_state) AND the
+                # music pipeline holds render_lock internally — they must NOT
+                # be wrapped in render_lock here (that self-deadlocks). Route
+                # them straight through the unified dispatcher.
+                if tier in MUSIC_TIERS:
+                    factory = getattr(pool, "pipeline_factory", None)
                     music_pipeline = (
-                        pool.pipeline_factory.music_pipeline
-                        if pool.pipeline_factory is not None
-                        else None
+                        factory.music_pipeline if factory is not None else None
                     )
                     try:
                         reply = await dispatch_request(
@@ -499,7 +309,7 @@ async def _handle_client(
                     except Exception as exc:
                         log.exception(
                             "music.dispatch_failed tier=%s exc=%s",
-                            params.get("tier"),
+                            tier,
                             exc.__class__.__name__,
                         )
                         _write(
@@ -514,318 +324,21 @@ async def _handle_client(
                     _write(writer, req_id, result=reply["result"])
                     continue
 
-                # Beat filter: skip non-visual beats before expensive GPU work
-                if params.get("narration") and params.get("game_state"):
-                    from sidequest_daemon.renderer.beat_filter import should_generate
-                    from sidequest_daemon.types import (
-                        GameState,
-                        CombatState,
-                        ChaseState,
-                        Character,
-                    )
-
-                    gs_raw = params["game_state"]
-                    game_state = GameState(
-                        location=gs_raw.get("location", ""),
-                        time_of_day=gs_raw.get("time_of_day", ""),
-                        characters=[
-                            Character(name=c.get("name", ""))
-                            for c in gs_raw.get("characters", [])
-                        ],
-                        combat=CombatState(
-                            in_combat=gs_raw.get("combat", {}).get("in_combat", False)
-                        ),
-                        chase=ChaseState(
-                            in_chase=gs_raw.get("chase", {}).get("in_chase", False)
-                        ),
-                    )
-                    previous_location = params.get("previous_location")
-                    if not should_generate(
-                        params["narration"], game_state, previous_location
-                    ):
-                        log.info("beat_filter: skipping non-visual beat")
-                        _write(
-                            writer,
-                            req_id,
-                            result={"status": "skipped", "reason": "beat_filter"},
-                        )
-                        continue
-
-                # If narration is provided, use SceneInterpreter for fast rule-based
-                # StageCue extraction, then fall back to LLM subject extraction.
-                if params.get("narration") and not params.get("positive_prompt"):
-                    from sidequest_daemon.scene_interpreter import SceneInterpreter
-                    from sidequest_daemon.types import GameState, Character
-
-                    narrator_text = params["narration"]
-
-                    # Extract documents and strip markers before visual processing
-                    scene_interp = SceneInterpreter()
-                    genre = params.get("genre", "unknown")
-                    doc_events = scene_interp.extract_documents(
-                        narrator_text, genre=genre
-                    )
-                    if doc_events:
-                        log.info(
-                            "scene_interpreter: extracted %d document(s)",
-                            len(doc_events),
-                        )
-                        params.setdefault("document_events", [])
-                        for doc in doc_events:
-                            params["document_events"].append(doc.model_dump())
-                    narrator_text = scene_interp.strip_document_markers(narrator_text)
-                    params["narration"] = narrator_text
-
-                    # Try rule-based StageCue extraction (fast, no LLM)
-                    gs_raw = params.get("game_state", {})
-                    interp_state = GameState(
-                        location=gs_raw.get("location", ""),
-                        time_of_day=gs_raw.get("time_of_day", ""),
-                        characters=[
-                            Character(name=c.get("name", ""))
-                            for c in gs_raw.get("characters", [])
-                        ],
-                    )
-                    # Only run rule-based interpretation when the caller did
-                    # NOT already supply a structured visual block. The
-                    # server-side narrator agent emits {tier, subject, mood,
-                    # tags} as structured output (see
-                    # sidequest-server/sidequest/agents/narrator.py — the
-                    # visual JSON block) and the dispatcher forwards those
-                    # fields verbatim. Overriding them here silently
-                    # second-guesses the agent's classification, which is
-                    # how a narrator-classified `landscape` was being
-                    # rewritten to `scene_illustration` by an atmosphere
-                    # rule match — then validated as `kind=illustration`
-                    # without the PC `participants` the server only
-                    # populates on the `tier=scene_illustration` branch.
-                    # That mis-routed shape was the playtest 2026-04-30
-                    # COMPOSE_FAILED signature.
-                    server_supplied_tier = (
-                        params.get("tier") in IMAGE_TIERS
-                        and bool(params.get("subject"))
-                    )
-                    if not server_supplied_tier:
-                        cues = scene_interp.interpret(narrator_text, interp_state)
-                        if cues:
-                            top_cue = cues[0]
-                            params["subject"] = top_cue.subject
-                            params["mood"] = top_cue.mood
-                            params["tags"] = top_cue.tags
-                            params["tier"] = top_cue.tier.value
-                            with tracer.start_as_current_span(
-                                "scene_interpreter.classified"
-                            ) as cls_span:
-                                cls_span.set_attribute("tier", top_cue.tier.value)
-                                cls_span.set_attribute("subject", top_cue.subject[:120])
-                                cls_span.set_attribute("source", "rule_match")
-                            log.info(
-                                "scene_interpreter — tier=%s subject=%s",
-                                top_cue.tier.value,
-                                top_cue.subject[:80],
-                            )
-                    else:
-                        with tracer.start_as_current_span(
-                            "scene_interpreter.skipped"
-                        ) as skip_span:
-                            skip_span.set_attribute(
-                                "reason", "server_supplied_visual_block"
-                            )
-                            skip_span.set_attribute("tier", str(params.get("tier", "")))
-                        log.info(
-                            "scene_interpreter — skipped (server tier=%s subject=%s)",
-                            params.get("tier"),
-                            str(params.get("subject", ""))[:80],
-                        )
-
-                    # Fall back to LLM subject extraction if SceneInterpreter
-                    # didn't produce a subject (or for refinement)
-                    if not params.get("subject"):
-                        from sidequest_daemon.media.subject_extractor import (
-                            SubjectExtractor,
-                        )
-
-                        extractor = SubjectExtractor()
-                        extracted = await extractor.extract(params["narration"])
-                        if not extracted or not extracted.get("subject"):
-                            _write(
-                                writer,
-                                req_id,
-                                error={
-                                    "code": "EXTRACTION_FAILED",
-                                    "message": "SubjectExtractor returned no visual subject from narration. No fallback — refusing to render narrative prose directly.",
-                                },
-                            )
-                            continue
-                        # Build StageCue-compatible params from extraction
-                        params["subject"] = extracted["subject"]
-                        params["mood"] = extracted.get("mood", "")
-                        params["tags"] = extracted.get("tags", [])
-                        # Override tier if extractor found a better one
-                        extracted_tier = extracted.get("tier", "")
-                        if extracted_tier:
-                            tier_lower = extracted_tier.lower()
-                            if tier_lower in IMAGE_TIERS:
-                                params["tier"] = tier_lower
-                        log.info(
-                            "narration_extracted — subject=%s, mood=%s, tier=%s",
-                            extracted["subject"][:80],
-                            extracted.get("mood"),
-                            params.get("tier"),
-                        )
-
-                composed = None
-                if not params.get("positive_prompt"):
-                    missing = [
-                        k for k in ("subject", "world", "genre") if not params.get(k)
-                    ]
-                    try:
-                        if missing:
-                            with tracer.start_as_current_span(
-                                "compose.gate_short_circuit"
-                            ) as gate_span:
-                                gate_span.set_attribute(
-                                    "missing_fields", ",".join(missing)
-                                )
-                                gate_span.set_attribute(
-                                    "tier", params.get("tier", "")
-                                )
-                            raise RenderConfigError(
-                                f"render request missing required field(s): {missing}"
-                            )
-
-                        from sidequest_daemon.media.workers.zimage_mlx_worker import (
-                            build_cue_from_params,
-                            compose_prompt_for,
-                        )
-
-                        cue = build_cue_from_params(params)
-                        composed = compose_prompt_for(cue)
-                        params["positive_prompt"] = composed.positive_prompt
-                        params["clip_prompt"] = composed.clip_prompt
-                        params["negative_prompt"] = composed.negative_prompt
-                        params["seed"] = composed.seed
-                        # Story 78-1: forward the resolved camera's post
-                        # directive (crop/rotate) so the worker applies it
-                        # after generation. JSON-dict form keeps params
-                        # socket-serializable; None when the camera sets none.
-                        params["post"] = (
-                            composed.post.model_dump()
-                            if composed.post is not None
-                            else None
-                        )
-                        log.info(
-                            "prompt_composed — positive=%s",
-                            composed.positive_prompt[:150],
-                        )
-                    except (
-                        RenderConfigError,
-                        StyleMissError,
-                        CatalogMissError,
-                        BudgetError,
-                        ValueError,
-                        # Pingpong 2026-04-30: ``IndexError`` from
-                        # ``_character_lod_plan`` (landscape tier with
-                        # empty participants) leaked past this handler,
-                        # closing the socket mid-request — server logged
-                        # ``render.reply_unavailable error=daemon closed
-                        # socket before sending a reply``, the real
-                        # IndexError was hidden in the daemon log, and
-                        # 2 of 2 landscape dispatches silently disappeared
-                        # from the Scrapbook. Adding ``IndexError`` /
-                        # ``KeyError`` / ``AttributeError`` / ``TypeError``
-                        # (the typical "data shape unexpected" failures)
-                        # so future tier-wide compose failures emit the
-                        # ``compose.failed`` span + structured COMPOSE_FAILED
-                        # error frame instead of breaking the JSON-RPC
-                        # transport. Matches the user's pingpong note
-                        # request: "Add a daemon.compose_failed watcher
-                        # span at the daemon `_handle_client` exception
-                        # handler so future tier-wide failures show up in
-                        # the dashboard instead of /tmp/sidequest-daemon.log."
-                        # The narrower fix in prompt_composer.py prevents
-                        # this specific IndexError from firing again, but
-                        # this defense-in-depth guards the next data-shape
-                        # bug — and converts an opaque socket-close into a
-                        # GM-panel-visible event.
-                        IndexError,
-                        KeyError,
-                        AttributeError,
-                        TypeError,
-                    ) as e:
-                        # JSON-RPC contract: a render request must always get
-                        # either a result or an error frame. Compose-time
-                        # exceptions used to bubble out of `_handle_client`
-                        # (only `ConnectionResetError`/`BrokenPipeError` are
-                        # caught at the outer scope), which closed the socket
-                        # mid-request. The server then reported
-                        # `daemon.outcome=eof_before_reply` and
-                        # `daemon_unavailable` — masking the real failure
-                        # (e.g. `PlaceCatalog` rejecting a non-`where:` ref)
-                        # behind a transport error.
-                        #
-                        # Per CLAUDE.md "OTEL Observability Principle": fail
-                        # LOUD to the client, not silently to the socket.
-                        with tracer.start_as_current_span(
-                            "compose.failed"
-                        ) as fail_span:
-                            fail_span.set_attribute("tier", params.get("tier", ""))
-                            fail_span.set_attribute("error_type", type(e).__name__)
-                            fail_span.set_attribute("error_message", str(e)[:512])
-                            fail_span.set_attribute(
-                                "world", params.get("world", "")
-                            )
-                            fail_span.set_attribute(
-                                "genre", params.get("genre", "")
-                            )
-                        # Watcher event for the GM panel (pingpong
-                        # 2026-04-30 daemon-tier-failure ask). The
-                        # ``compose.failed`` OTEL span above is for tracer
-                        # consumers (Jaeger / OTLP); the watcher event is
-                        # the path the dashboard's Console / Subsystems
-                        # tabs read. Both fire so the failure is visible
-                        # at every observation tier.
-                        # sync — see sidequest_daemon/telemetry/watcher_bridge.py docstring for trade-off rationale
-                        _emit_watcher_event(
-                            "daemon_compose_failed",
-                            {
-                                "tier": params.get("tier", ""),
-                                "error_type": type(e).__name__,
-                                "error_message": str(e)[:512],
-                                "world": params.get("world", ""),
-                                "genre": params.get("genre", ""),
-                                "render_id": params.get("render_id", ""),
-                            },
-                        )
-                        log.warning(
-                            "render.compose_failed — tier=%s err_type=%s err=%s",
-                            params.get("tier", ""),
-                            type(e).__name__,
-                            e,
-                        )
-                        _write(
-                            writer,
-                            req_id,
-                            error={
-                                "code": "COMPOSE_FAILED",
-                                "message": f"{type(e).__name__}: {e}",
-                                "error_type": type(e).__name__,
-                                "tier": params.get("tier", ""),
-                            },
-                        )
-                        continue
-
-                # Serialize renders — only one GPU operation at a time.
-                # Story 37-23: wrap dispatch in OTEL span so the GM panel can
-                # verify render acquired render_lock (not embed_lock).
+                # Image tiers: the unified dispatcher routes to RenderService
+                # (story 101-7). The render_lock, the daemon.dispatch.render
+                # span, and the per-queue heartbeats stay here at the
+                # socket-dispatch site — story 37-23 keeps the lock + span +
+                # lock_name attribute observable in this module, and the
+                # heartbeats are per-connection (story 45-31).
+                render_service = RenderService(pool)
+                reply: dict | None = None
                 with tracer.start_as_current_span("daemon.dispatch.render") as span:
                     span.set_attribute("lock_name", "render_lock")
-                    span.set_attribute("tier", params.get("tier", ""))
+                    span.set_attribute("tier", tier or "")
                     async with render_lock:
                         # Story 45-31: per-queue heartbeat on render-lock
-                        # acquire/release. Increments the in-flight count
-                        # so the heartbeat's queue_depth reflects real
-                        # concurrent load.
+                        # acquire/release. Increments the in-flight count so
+                        # the heartbeat's queue_depth reflects real load.
                         _IN_FLIGHT_COUNTS["image"] += 1
                         _write_heartbeat(writer, "image", WorkerState.BUSY.value)
                         try:
@@ -833,60 +346,20 @@ async def _handle_client(
                         except (ConnectionResetError, BrokenPipeError):
                             pass
                         try:
-                            result = await asyncio.to_thread(pool.render, params)
-                            with tracer.start_as_current_span(
-                                "render.completed"
-                            ) as completed:
-                                final_prompt = params.get("positive_prompt", "")
-                                completed.set_attribute(
-                                    "genre", params.get("genre", "")
-                                )
-                                completed.set_attribute(
-                                    "world", params.get("world", "")
-                                )
-                                # R2 migration: surface session_id and the
-                                # uploaded r2_key on render.completed so the
-                                # GM panel can verify the artifact landed.
-                                # Empty session_id at this point means the
-                                # server didn't thread it through — the
-                                # worker fell back to "unknown" and the GM
-                                # panel can flag it.
-                                completed.set_attribute(
-                                    "session_id", params.get("session_id", "")
-                                )
-                                completed.set_attribute(
-                                    "r2_key", str(result.get("r2_key") or "")
-                                )
-                                completed.set_attribute(
-                                    "tier", params.get("tier", "")
-                                )
-                                completed.set_attribute(
-                                    "prompt_length", len(final_prompt)
-                                )
-                                genre_applied = False
-                                world_applied = False
-                                if composed is not None:
-                                    for layer in composed.layers:
-                                        tokens = layer.tokens.strip()
-                                        if not tokens:
-                                            continue
-                                        if (
-                                            layer.slot == "ART_SENSIBILITY.GENRE"
-                                            and tokens in final_prompt
-                                        ):
-                                            genre_applied = True
-                                        elif (
-                                            layer.slot == "ART_SENSIBILITY.WORLD"
-                                            and tokens in final_prompt
-                                        ):
-                                            world_applied = True
-                                completed.set_attribute(
-                                    "genre_style_applied", genre_applied
-                                )
-                                completed.set_attribute(
-                                    "world_style_applied", world_applied
-                                )
-                            _write(writer, req_id, result=result)
+                            reply = await dispatch_request(
+                                req, render_service=render_service
+                            )
+                        except RenderError as e:
+                            # Compose/extraction/generation failure — fail loud
+                            # with the structured frame the server expects.
+                            err = {"code": e.code, "message": e.message}
+                            if e.error_type is not None:
+                                err["error_type"] = e.error_type
+                            if e.tier is not None:
+                                err["tier"] = e.tier
+                            span.set_attribute("error", True)
+                            span.set_attribute("error_type", e.error_type or e.code)
+                            _write(writer, req_id, error=err)
                         except asyncio.CancelledError:
                             # Client disconnect is the most common failure mode;
                             # mark the span so cancellations are distinguishable
@@ -894,16 +367,31 @@ async def _handle_client(
                             span.set_attribute("error", True)
                             span.set_attribute("error_type", "CancelledError")
                             raise
+                        except ValueError as e:
+                            # Unknown tier — fail loud (No Silent Fallbacks).
+                            span.set_attribute("error", True)
+                            span.set_attribute("error_type", "ValueError")
+                            log.warning("render.unknown_tier — %s", e)
+                            _write(
+                                writer,
+                                req_id,
+                                error={"code": "UNKNOWN_TIER", "message": str(e)},
+                            )
                         except Exception as e:
                             span.set_attribute("error", True)
                             span.set_attribute("error_type", type(e).__name__)
                             log.exception(
-                                "render.failed — tier=%s", params.get("tier", "")
+                                "render.dispatch_failed — tier=%s", tier
                             )
                             _write(
                                 writer,
                                 req_id,
-                                error={"code": "GENERATION_FAILED", "message": str(e)},
+                                error={
+                                    "code": "GENERATION_FAILED",
+                                    # Truncate — an unexpected exception can carry
+                                    # local paths; don't forward verbatim (CWE-209).
+                                    "message": str(e)[:512],
+                                },
                             )
                         finally:
                             # Story 45-31: heartbeat on render-lock release.
@@ -913,13 +401,15 @@ async def _handle_client(
                             _IN_FLIGHT_COUNTS["image"] = max(
                                 0, _IN_FLIGHT_COUNTS["image"] - 1
                             )
-                            _write_heartbeat(
-                                writer, "image", WorkerState.READY.value
-                            )
+                            _write_heartbeat(writer, "image", WorkerState.READY.value)
                             try:
                                 await writer.drain()
                             except (ConnectionResetError, BrokenPipeError):
                                 pass
+                # Success (or beat-filter skip) → write the result frame. Error
+                # frames were already written inside the lock; ``reply`` is None.
+                if reply is not None:
+                    _write(writer, req_id, result=reply["result"])
             elif method == "embed":
                 # Story 15-7: Generate sentence embeddings for lore fragments.
                 #
@@ -963,6 +453,8 @@ async def _handle_client(
                         except (ConnectionResetError, BrokenPipeError):
                             pass
                         try:
+                            import time
+
                             start = time.monotonic()
                             embedding = await asyncio.to_thread(pool.embed, text)
                             latency_ms = int((time.monotonic() - start) * 1000)
@@ -1010,9 +502,7 @@ async def _handle_client(
                             _IN_FLIGHT_COUNTS["embed"] = max(
                                 0, _IN_FLIGHT_COUNTS["embed"] - 1
                             )
-                            _write_heartbeat(
-                                writer, "embed", WorkerState.READY.value
-                            )
+                            _write_heartbeat(writer, "embed", WorkerState.READY.value)
                             try:
                                 await writer.drain()
                             except (ConnectionResetError, BrokenPipeError):
@@ -1084,9 +574,7 @@ async def _run_daemon(
     except OSError:
         # Non-fatal: server falls back to the env var path. Logged so the
         # GM panel / dev shell can spot the discovery hole.
-        import logging as _logging
-
-        _logging.getLogger(__name__).warning(
+        logging.getLogger(__name__).warning(
             "daemon.handshake_write_failed dir=%s",
             handshake_dir,
         )

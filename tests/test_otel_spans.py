@@ -95,7 +95,9 @@ class TestRenderSpan:
     def test_render_span_has_dimensions(self, tmp_path, otel_exporter):
         """render span must include width and height."""
         worker = _make_worker_with_mock_model(tmp_path)
-        worker.render({"tier": "cartography", "positive_prompt": "map", "seed": 0})
+        # Story 101-1: was "cartography" (removed); fog_of_war is the surviving
+        # 1024x1024 tier.
+        worker.render({"tier": "fog_of_war", "positive_prompt": "map", "seed": 0})
 
         spans = otel_exporter.get_finished_spans()
         render_spans = [s for s in spans if s.name == "zimage_mlx.render"]
@@ -117,12 +119,14 @@ class TestRenderSpan:
     def test_render_span_has_steps(self, tmp_path, otel_exporter):
         """render span must include the step count for the tier."""
         worker = _make_worker_with_mock_model(tmp_path)
-        worker.render({"tier": "cartography", "positive_prompt": "map", "seed": 0})
+        # Story 101-1: was "cartography" (removed); fog_of_war shares the
+        # high-fidelity 20-step config under base Z-Image 1.0.
+        worker.render({"tier": "fog_of_war", "positive_prompt": "map", "seed": 0})
 
         spans = otel_exporter.get_finished_spans()
         render_spans = [s for s in spans if s.name == "zimage_mlx.render"]
         attrs = dict(render_spans[-1].attributes)
-        # Default flipped to high_fidelity 2026-05-02 — cartography now uses
+        # Default flipped to high_fidelity 2026-05-02 — fog_of_war uses
         # 20 steps under base Z-Image 1.0 (was 8 under Turbo).
         assert attrs.get("render.steps") == 20
 

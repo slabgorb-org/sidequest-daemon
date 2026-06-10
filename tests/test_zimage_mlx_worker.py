@@ -287,13 +287,18 @@ _SOURCE_ROOT = Path(__file__).resolve().parents[1] / "sidequest_daemon"
 # Canonical (and only allowed) caller of `load_model()` on an image
 # worker. `WorkerPool.warm_up_image()` lives here. Any other production
 # caller would bypass the singleton/idempotency guards.
-_ALLOWED_LOAD_MODEL_CALLER = _SOURCE_ROOT / "media" / "daemon.py"
+# Story 101-7: WorkerPool (and its warm_up_image → load_model call site) was
+# extracted out of the daemon god module into media/worker_pool.py. The
+# singleton invariant is unchanged — WorkerPool is still the only caller — but
+# the file that hosts WorkerPool moved, so the allowed call site moves with it.
+_ALLOWED_LOAD_MODEL_CALLER = _SOURCE_ROOT / "media" / "worker_pool.py"
 
 
 def test_load_model_only_called_by_workerpool() -> None:
     """Wiring proof per daemon CLAUDE.md: `load_model()` on the image
     worker must be invoked exclusively by `WorkerPool.warm_up_image` in
-    `sidequest_daemon/media/daemon.py`.
+    `sidequest_daemon/media/worker_pool.py` (extracted from daemon.py in
+    story 101-7).
 
     The pattern matches ANY `.load_model(` call site (regardless of how
     the caller names the handle — `worker.load_model()`, `img.load_model()`,

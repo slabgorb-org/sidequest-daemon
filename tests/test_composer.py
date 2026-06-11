@@ -348,6 +348,26 @@ def test_portrait_without_background_keeps_default_camera(composer: PromptCompos
     assert cam.source == "portrait_3q"
 
 
+def test_portrait_camera_passthrough_wins_over_in_location_autoselect(
+    composer: PromptComposer,
+) -> None:
+    # Precedence guard: the `{camera}` recipe binding is checked BEFORE the
+    # portrait_in_location auto-select in _resolve_camera_preset. The shipped
+    # portrait recipe binds a fixed preset, so rebind it to `{camera}` here
+    # (fixture is function-scoped — no cross-test leakage) and verify an
+    # explicit target.camera beats the background-driven auto-select.
+    composer._recipes.recipes["portrait"] = composer._recipes.recipes[
+        "portrait"
+    ].model_copy(update={"direction_camera": "{camera}"})
+    t = RenderTarget(
+        kind="portrait", world="testworld", genre="testgenre",
+        character="npc:rux", background="where:testworld/the_lookout",
+        camera=CameraPreset.portrait_closeup,
+    )
+    cam = composer._resolve_direction_camera(t)
+    assert cam.source == "portrait_closeup"
+
+
 def test_illustration_camera_from_render_target(composer: PromptComposer) -> None:
     t = RenderTarget(
         kind="illustration", world="testworld", genre="testgenre",

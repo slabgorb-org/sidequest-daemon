@@ -120,6 +120,7 @@ def build_render_target(cue: StageCue) -> RenderTarget:
             character=character,
             camera=cue.camera,
             fidelity=fidelity,
+            background=cue.metadata.get("background") or None,
         )
     if cue.tier == RenderTier.LANDSCAPE:
         # LANDSCAPE has two valid shapes:
@@ -196,6 +197,9 @@ def build_cue_from_params(params: dict) -> StageCue:
     pc_descriptor = params.get("pc_descriptor")
     if pc_descriptor is not None:
         metadata["pc_descriptor"] = pc_descriptor
+    background = params.get("background", "")
+    if background:
+        metadata["background"] = background
     return StageCue(
         subject=params.get("subject", ""),
         tier=tier,

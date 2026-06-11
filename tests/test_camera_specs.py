@@ -11,9 +11,9 @@ from sidequest_daemon.media.recipes import CameraPreset
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_loads_all_seventeen_presets():
+def test_loads_all_eighteen_presets():
     loader = CameraLoader.from_file(REPO_ROOT / "cameras.yaml")
-    assert len(loader.specs) == 17
+    assert len(loader.specs) == 18
     for preset in CameraPreset:
         assert preset in loader.specs
 

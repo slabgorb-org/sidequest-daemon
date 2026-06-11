@@ -35,13 +35,14 @@ class PlaceLOD(str, Enum):
 
 
 class CameraPreset(str, Enum):
-    """Enumerated camera presets — 17 total, stills-only (no motion)."""
+    """Enumerated camera presets — 18 total, stills-only (no motion)."""
 
     # Portrait framings
     portrait_3q = "portrait_3q"
     portrait_profile = "portrait_profile"
     portrait_closeup = "portrait_closeup"
     portrait_full_body = "portrait_full_body"
+    portrait_in_location = "portrait_in_location"
     # POI framings
     wide_establishing = "wide_establishing"
     low_angle_hero = "low_angle_hero"

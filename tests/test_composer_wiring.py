@@ -208,6 +208,53 @@ def test_compose_with_pc_descriptor_registers_runtime_pc(monkeypatch) -> None:
     assert "hand resting on belt" in composed.positive_prompt
 
 
+def test_build_target_portrait_threads_background() -> None:
+    """background in StageCue.metadata must surface on the resulting RenderTarget.
+
+    Task 8 wiring pin: ``build_render_target`` must forward
+    ``cue.metadata["background"]`` to ``RenderTarget.background`` so the
+    PromptComposer can auto-select the ``portrait_in_location`` recipe when a
+    backdrop POI is specified.
+    """
+    cue = StageCue(
+        tier=RenderTier.PORTRAIT,
+        subject="npc:rux",
+        characters=["npc:rux"],
+        metadata={"world": "w", "genre": "g", "background": "where:w/plaza"},
+    )
+    target = zimage_mlx_worker.build_render_target(cue)
+    assert target.kind == "portrait"
+    assert target.background == "where:w/plaza"
+
+
+def test_build_cue_from_params_forwards_background() -> None:
+    """background param must land in StageCue.metadata so it reaches
+    build_render_target and ultimately RenderTarget.background."""
+    params = {
+        "tier": "portrait",
+        "subject": "npc:rux",
+        "characters": ["npc:rux"],
+        "world": "coyote_star",
+        "genre": "space_opera",
+        "background": "where:coyote_star/landing_pad",
+    }
+    cue = zimage_mlx_worker.build_cue_from_params(params)
+    assert cue.metadata["background"] == "where:coyote_star/landing_pad"
+
+
+def test_build_cue_from_params_omits_background_when_absent() -> None:
+    """No background in params → no background key in metadata."""
+    params = {
+        "tier": "portrait",
+        "subject": "npc:rux",
+        "characters": ["npc:rux"],
+        "world": "coyote_star",
+        "genre": "space_opera",
+    }
+    cue = zimage_mlx_worker.build_cue_from_params(params)
+    assert "background" not in cue.metadata
+
+
 def test_compose_succeeds_for_pc_ref_with_descriptor(monkeypatch) -> None:
     """compose_prompt_for must succeed when the cue carries a pc:<slug>
     ref AND a matching descriptor — the catalog miss is avoided by the

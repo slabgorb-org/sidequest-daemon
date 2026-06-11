@@ -31,8 +31,8 @@ def test_place_lod_levels():
     assert [m.value for m in PlaceLOD] == ["solo", "backdrop"]
 
 
-def test_camera_preset_count_is_seventeen():
-    assert len(CameraPreset) == 17
+def test_camera_preset_count_is_eighteen():
+    assert len(CameraPreset) == 18
 
 
 def test_camera_preset_contains_canary_presets():

@@ -326,6 +326,28 @@ def test_portrait_camera_uses_recipe_default(composer: PromptComposer) -> None:
     assert layer.tokens == ""
 
 
+def test_portrait_in_location_uses_guarded_preset(composer: PromptComposer) -> None:
+    t = RenderTarget(
+        kind="portrait", world="testworld", genre="testgenre",
+        character="npc:rux", background="where:testworld/the_lookout",
+    )
+    result = composer.compose(t)
+    p = result.positive_prompt
+    assert "single continuous photograph" in p
+    assert "telephoto" in p
+    cam = composer._resolve_direction_camera(t)
+    assert cam.source == "portrait_in_location"
+
+
+def test_portrait_without_background_keeps_default_camera(composer: PromptComposer) -> None:
+    t = RenderTarget(
+        kind="portrait", world="testworld", genre="testgenre",
+        character="npc:rux",
+    )
+    cam = composer._resolve_direction_camera(t)
+    assert cam.source == "portrait_3q"
+
+
 def test_illustration_camera_from_render_target(composer: PromptComposer) -> None:
     t = RenderTarget(
         kind="illustration", world="testworld", genre="testgenre",

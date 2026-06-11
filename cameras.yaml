@@ -24,6 +24,13 @@ portrait_full_body:
   prompt: >-
     full-body standing portrait, full outfit and stance visible, grounded pose
 
+portrait_in_location:
+  prompt: >-
+    single continuous photograph, long telephoto lens compression, the subject
+    standing in the foreground occupying the frame, the surrounding location
+    softly out of focus behind them through shallow depth of field, one cohesive
+    cinematic frame, environmental portrait
+
 # --- POI framings ---
 wide_establishing:
   prompt: >-

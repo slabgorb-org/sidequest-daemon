@@ -482,10 +482,21 @@ class PromptComposer:
         (which may be ``None``). Single source of truth shared by
         ``_resolve_direction_camera`` (which requires a preset) and
         ``_resolve_post_directive`` (which tolerates its absence).
+
+        Special case: when kind=="portrait" and ``target.background`` is set,
+        auto-selects ``portrait_in_location`` (montage-guarded telephoto preset)
+        instead of the recipe default. This prevents the Z-Image montage trap —
+        describing a tight face AND a wide scene in the same prompt produces a
+        split close-up/wide composite with stray faces in scenery. The Leone
+        move (long telephoto, subject in foreground, shallow DoF) keeps the
+        frame cohesive. Explicit ``{camera}`` passthrough recipes win if the
+        recipe ever switches to that binding.
         """
         recipe = self._recipes.get(target.kind)
         if recipe.direction_camera == "{camera}":
             return target.camera
+        if target.kind == "portrait" and target.background:
+            return CameraPreset.portrait_in_location
         return CameraPreset(recipe.direction_camera)
 
     def _resolve_direction_camera(self, target: RenderTarget) -> LayerContribution:

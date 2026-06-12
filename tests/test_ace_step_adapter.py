@@ -93,13 +93,28 @@ def test_prepare_inference_params_only_emits_kwargs_acestep_accepts(tmp_path):
     """Wiring guard — every key prepare_inference_params produces must be a
     valid kwarg of ACEStepPipeline.__call__. Catches the actual_seeds vs
     manual_seeds rename drift that broke first real-pipeline call after
-    daemon-music-tier merged. Does NOT instantiate the pipeline (avoids
-    GPU/model load); only inspects the signature."""
-    import inspect
+    daemon-music-tier merged.
 
-    from acestep.pipeline_ace_step import ACEStepPipeline
-
-    accepted = set(inspect.signature(ACEStepPipeline.__call__).parameters) - {"self"}
+    The accepted-kwarg set is a frozen snapshot of ACEStepPipeline.__call__'s
+    signature, NOT a live `import acestep` introspection. Importing the real
+    package pulls in torch + the full ACE-Step model stack — slow enough to
+    hang a unit-test run and starve a concurrent render. If ACE-Step's
+    signature changes upstream, refresh this set from the source of truth:
+    `../../ACE-Step/acestep/pipeline_ace_step.py` → `def __call__`
+    (snapshot taken 2026-06-12)."""
+    accepted = {
+        "format", "audio_duration", "prompt", "lyrics", "infer_step",
+        "guidance_scale", "scheduler_type", "cfg_type", "omega_scale",
+        "manual_seeds", "guidance_interval", "guidance_interval_decay",
+        "min_guidance_scale", "use_erg_tag", "use_erg_lyric",
+        "use_erg_diffusion", "oss_steps", "guidance_scale_text",
+        "guidance_scale_lyric", "audio2audio_enable", "ref_audio_strength",
+        "ref_audio_input", "lora_name_or_path", "lora_weight", "retake_seeds",
+        "retake_variance", "task", "repaint_start", "repaint_end",
+        "src_audio_path", "edit_target_prompt", "edit_target_lyrics",
+        "edit_n_min", "edit_n_max", "edit_n_avg", "save_path", "batch_size",
+        "debug",
+    }
 
     raw = {
         "task": "text2music",

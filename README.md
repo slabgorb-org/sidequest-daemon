@@ -18,7 +18,7 @@ rendering services to the Python `sidequest-server` (port 8765, ADR-082).
 sidequest-server (Python)  ──JSON over Unix socket──►  sidequest-daemon (Python)
                                                          ├── Z-Image image generation (MLX, Apple Silicon)
                                                          ├── ACE-Step music generation (operator-triggered)
-                                                         ├── Audio playback (pygame-ce mixer)
+                                                         ├── Sentence embeddings (ADR-048 lore RAG)
                                                          └── Scene interpretation (narration → StageCue)
 ```
 
@@ -46,8 +46,13 @@ WAV→OGG (libopus 96k) → R2 upload at
 `genre_packs/<pack>/audio/music/<track>.ogg`. Generation is **operator-
 triggered**, not per-turn — costly and slow, so it's a build-time act.
 
-**Audio Playback** (`audio/`) — `pygame-ce` mixer with music + SFX channels.
-TTS / voice / ducking paths are gone (2026-04).
+**Embedding Worker** (`media/embed_worker.py`, ADR-048) — Sentence-embedding
+worker behind the `embed` method, feeding the cross-process lore RAG store.
+Pre-loaded by `warm_up` alongside the Z-Image model.
+
+> Server-side audio playback once lived here (a `pygame-ce` mixer in `audio/`);
+> it was removed with the 2026-04 TTS removal. Music + SFX now play client-side
+> in `sidequest-ui`.
 
 **Scene Interpreter** (`scene_interpreter.py`) — Rules-based narration-to-
 `StageCue` extractor. Turns narrator prose into structured visual cues for the
@@ -124,6 +129,7 @@ Newline-delimited JSON over Unix domain socket at `/tmp/sidequest-renderer.sock`
 | `status` | Worker pool status and loaded models |
 | `render` | Generate an image, routed by `tier` |
 | `music` | Generate a music track via ACE-Step (ADR-095) — operator-triggered |
+| `embed` | Generate a sentence embedding for the lore RAG store (ADR-048) |
 | `warm_up` | Pre-load the Z-Image model (and embedding model for ADR-048 lore RAG) |
 | `shutdown` | Graceful daemon shutdown |
 
@@ -135,6 +141,11 @@ sidequest_daemon/
 │   ├── daemon.py                # Entry point — Unix socket server + CLI
 │   ├── workers/
 │   │   └── zimage_mlx_worker.py # Sole runtime image worker (ADR-070)
+│   ├── worker_pool.py           # Singleton Z-Image + embedding workers
+│   ├── render_service.py        # Render request orchestration, lock, post-process
+│   ├── pipeline_factory.py      # Constructs render pipelines
+│   ├── tiers.py                 # Render tier constants
+│   ├── embed_worker.py          # Sentence-embedding worker (ADR-048 lore RAG)
 │   ├── music_pipeline.py        # ACE-Step → ffmpeg → R2 (ADR-095)
 │   ├── ace_step_adapter.py
 │   ├── prompt_composer.py       # Tier-aware prompt prefixes, token budgeting
@@ -144,14 +155,18 @@ sidequest_daemon/
 │   ├── post_processor.py        # Post-render adjustments
 │   ├── preview.py
 │   ├── r2_writer.py             # R2 upload for music artifacts
-│   ├── gpu_detect.py
 │   └── zimage_config.py
 ├── renderer/                    # Data models (StageCue, RenderTier, RenderResult)
-├── audio/                       # Mixer (pygame-ce), library backend, scene rotation
+├── training/                    # Fine-tune + deploy CLIs: sidequest-train,
+│                                #   sidequest-deploy (ADR-073)
+├── telemetry/                   # watcher_bridge.py — OTEL HTTP bridge to server (ADR-131)
 ├── genre/                       # Genre pack model subset (VisualStyle, AudioConfig)
-├── ml/                          # GPU memory management (ADR-046)
 └── scene_interpreter.py         # Narrative → StageCue rules engine
 ```
+
+> The `ml/` (ADR-046 GPU memory budget) and `audio/` (`pygame-ce` mixer) modules
+> were removed as dead code in 2026-06; ADR-046 is retired. Music ducking and TTS
+> playback are gone with the 2026-04 TTS removal.
 
 > If a file listed above has moved or been removed, treat the source tree as
 > authoritative and update this README rather than the other way around.

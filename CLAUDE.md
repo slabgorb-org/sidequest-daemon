@@ -17,11 +17,13 @@ This is a personal project under the `slabgorb-org` GitHub organization.
 
 ## SideQuest System Overview
 
-Four repos compose the SideQuest stack (Python backend per ADR-082, ported from the Rust prototype 2026-04):
+Six repos compose the SideQuest stack (Python backend per ADR-082, ported from the Rust prototype 2026-04):
 - **sidequest-server** — Python/FastAPI game engine and WebSocket API on port 8765
 - **sidequest-ui** — React/TypeScript game client (Vite, port 5173)
-- **sidequest-daemon** — Python media services (image gen, audio library playback)
+- **sidequest-daemon** — Python media services (image gen, music gen)
 - **sidequest-content** — Genre packs (YAML configs, audio, images, world data)
+- **sidequest-composer** — Standalone CLI: public-domain notation → rights-free audio (offline)
+- **sidequest-understudy** — Naive simulated-player playtest client
 
 Orchestrator repo (`orc-quest`, also cloned as `oq-1` / `oq-2`) coordinates sprint tracking, docs, ADRs, and cross-repo scripts.
 
@@ -69,8 +71,8 @@ Rust prototype in 2026-04. The Rust codebase is preserved read-only at
 https://github.com/slabgorb/sidequest-api for historical reference; older ADRs
 that show Rust code are historical illustration only — see `docs/adr/README.md`
 for the translation table. New backend code goes in Python. Media services
-(`sidequest-daemon`) remain Python for inference library maturity (Flux /
-Z-Image / ACE-Step). The narrator LLM path uses the Anthropic Python SDK by
+(`sidequest-daemon`) remain Python for inference library maturity (Z-Image /
+ACE-Step). The narrator LLM path uses the Anthropic Python SDK by
 default per ADR-101 (supersedes ADR-001; `claude -p`/Ollama are opt-in
 non-default backends). This daemon's own Claude usage — subject extraction
 in `media/subject_extractor.py` — is a non-narrator job that legitimately
@@ -107,7 +109,7 @@ Particularly relevant to this daemon repo:
 
 | Domain | ADRs |
 |--------|------|
-| IPC / transport | 035 (Unix socket IPC for Python sidecar), 046 (GPU memory budget coordinator) |
+| IPC / transport | 035 (Unix socket IPC for Python sidecar), 046 (GPU memory budget coordinator — *retired 2026-06; `ml/` module deleted*), 131 (daemon↔server out-of-band contracts — OTEL HTTP bridge) |
 | Image rendering | 070 (MLX image renderer — replaces PyTorch/diffusers), 086 (image-composition taxonomy: portrait / POI / illustration), 050 (image pacing throttle), 044 (speculative prerender), 083 (multi-LoRA stacking), 084 (LoRA composition dimension), 096 (cavern renderer revival — partial), 089 (cavern template generation) |
 | Music tier | 095 (daemon music tier via ACE-Step) |
 | Subject / prompts | 056 (script tool generators), 048 (lore RAG store with cross-process embedding) |
@@ -125,8 +127,8 @@ Historical (removed subsystems): TTS / Piper / Kokoro and runtime per-turn music
 - **Fully unspoiled:** Everything else
 ## Why a separate daemon
 
-This repo exists to keep image-generation library state (Flux / Z-Image
-weights, CUDA/MLX contexts) out of the request-handling server process. The
+This repo exists to keep image-generation library state (Z-Image weights,
+MLX contexts) out of the request-handling server process. The
 server (`sidequest-server`, Python) calls this daemon over a Unix socket per
 ADR-035 — the boundary survived the Rust→Python port (ADR-082) because the
 isolation benefits (independent restart, GPU lifecycle, slow warmup) still
